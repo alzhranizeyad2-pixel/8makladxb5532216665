@@ -26,7 +26,7 @@ try:
             self.wfile.write(b"Bot is running!")
         
         def log_message(self, format, *args):
-            pass  # Suppress logs
+            pass
     
     def run_keep_alive():
         try:
@@ -36,21 +36,11 @@ try:
         except:
             pass
     
-    # Start keep-alive server in background
     keep_alive_thread = threading.Thread(target=run_keep_alive, daemon=True)
     keep_alive_thread.start()
     print("✅ Keep-alive server started")
 except Exception as e:
     print(f"⚠️ Keep-alive server not started: {e}")
-
-# ============ FIX FOR PYTHON EVENT LOOP ============
-try:
-    asyncio.get_running_loop()
-except RuntimeError:
-    try:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-    except:
-        pass
 
 # ============ TELEGRAM IMPORTS ============
 try:
@@ -123,8 +113,8 @@ if not BOT_TOKEN:
     print("❌ BOT_TOKEN environment variable not set!")
     sys.exit(1)
 
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
-MAX_THREADS = 5  # 5 Threads for speed
+MAX_FILE_SIZE = 5 * 1024 * 1024
+MAX_THREADS = 3  # Changed to 3 for stability
 
 # ============ COUNTERS ============
 class Counters:
@@ -393,7 +383,7 @@ def find_txt_files(folder_path):
         pass
     return txt_files
 
-# ============ PROCESS COOKIE WITH THREADS ============
+# ============ PROCESS COOKIE (SINGLE FILE) ============
 def process_cookie_file(file_path):
     try:
         cookie_dict = extract_cookies_from_file(file_path)
@@ -431,36 +421,6 @@ def process_cookie_file(file_path):
         return result
     except Exception as e:
         return None
-
-def process_cookies_parallel(file_paths, status_callback=None):
-    results = []
-    total = len(file_paths)
-    completed = 0
-    
-    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        future_to_file = {executor.submit(process_cookie_file, f): f for f in file_paths}
-        
-        for future in as_completed(future_to_file):
-            completed += 1
-            try:
-                result = future.result(timeout=45)
-                if result:
-                    results.append(result)
-                    if result["status"] == "Active":
-                        counters.add_hit()
-                    elif result["status"] == "Canceled":
-                        counters.add_custom()
-                    elif result["status"] == "Free":
-                        counters.add_free()
-                else:
-                    counters.add_bad()
-            except Exception:
-                counters.add_bad()
-            
-            if status_callback:
-                status_callback(completed, total)
-    
-    return results
 
 # ============ MAIN BOT FUNCTIONS ============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -623,6 +583,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path, extract_dir, status_msg):
     try:
+        # Extract ZIP
         success, error_msg = extract_zip(file_path, extract_dir)
         
         if not success:
@@ -632,6 +593,7 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
             )
             return
         
+        # Find TXT files
         txt_files = find_txt_files(extract_dir)
         
         if not txt_files:
@@ -642,25 +604,40 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
             return
         
         total_files = len(txt_files)
+        results = []
+        completed = 0
         
-        def update_status(completed, total):
+        # Process files one by one (no threads to avoid issues)
+        for txt_file in txt_files:
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        status_msg.edit_text(
-                            f"⏳ **Processing your file...**\n\n"
-                            f"📁 {completed}/{total} files checked\n"
-                            f"📊 {counters.get_stats()}",
-                            parse_mode="Markdown"
-                        ),
-                        loop
-                    )
-            except:
-                pass
+                result = process_cookie_file(txt_file)
+                completed += 1
+                
+                if result:
+                    results.append(result)
+                    if result["status"] == "Active":
+                        counters.add_hit()
+                    elif result["status"] == "Canceled":
+                        counters.add_custom()
+                    elif result["status"] == "Free":
+                        counters.add_free()
+                else:
+                    counters.add_bad()
+                
+                # Update status every file
+                await status_msg.edit_text(
+                    f"⏳ **Processing your file...**\n\n"
+                    f"📁 {completed}/{total_files} files checked\n"
+                    f"📊 {counters.get_stats()}",
+                    parse_mode="Markdown"
+                )
+                
+            except Exception as e:
+                counters.add_bad()
+                print(f"Error processing file: {e}")
+                continue
         
-        results = process_cookies_parallel(txt_files, update_status)
-        
+        # Delete status message
         await status_msg.delete()
         
         if not results:
@@ -671,9 +648,11 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
                 parse_mode="Markdown"
             )
         else:
+            # Send each account as a separate message
             for i, result in enumerate(results, 1):
                 await send_account_message(update, context, result, i, len(results))
             
+            # Send summary with stats
             await update.message.reply_text(
                 f"✅ **Scan Complete!**\n\n"
                 f"📊 Total accounts found: {len(results)}\n"
@@ -714,24 +693,31 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
+        # Create status message
         status_msg = await update.message.reply_text(
             f"⏳ **Processing your file...**\n\n"
             f"📊 {counters.get_stats()}",
             parse_mode="Markdown"
         )
         
+        # Create temp directories
         temp_dir = tempfile.mkdtemp()
         extract_dir = os.path.join(temp_dir, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
         
+        # Download file
         file_path = os.path.join(temp_dir, file_name)
         file = await context.bot.get_file(document.file_id)
         await file.download_to_drive(file_path)
         
-        asyncio.create_task(process_zip_file(update, context, file_path, extract_dir, status_msg))
+        # Process file
+        await process_zip_file(update, context, file_path, extract_dir, status_msg)
         
     except Exception as e:
-        pass
+        await update.message.reply_text(
+            f"❌ **Error: {str(e)}**",
+            parse_mode="Markdown"
+        )
 
 async def send_account_message(update, context, result, index, total):
     status_emoji = "✅" if "Active" in result["status"] else "❌" if "Canceled" in result["status"] else "🆓"
@@ -817,15 +803,7 @@ def main():
         print("📊 Live statistics enabled!")
         print("🌐 Keep-alive server running for Render")
         
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        try:
-            loop.run_until_complete(application.run_polling(allowed_updates=Update.ALL_TYPES))
-        except KeyboardInterrupt:
-            print("Bot stopped by user")
-        finally:
-            loop.close()
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
             
     except Exception as e:
         print(f"Error: {e}")
