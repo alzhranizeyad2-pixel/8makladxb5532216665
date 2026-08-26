@@ -9,12 +9,26 @@ import asyncio
 import requests
 import urllib.parse
 from datetime import datetime
-from pathlib import Path
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+# ============ FIX FOR PYTHON 3.14 ============
+# Ensure event loop exists for Python 3.14+
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    try:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    except:
+        pass
+
+# ============ TELEGRAM IMPORTS ============
+try:
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+except Exception as e:
+    print(f"Telegram import error: {e}")
+    sys.exit(1)
 
 # ============ NETFLIX CONFIGURATION ============
 API_URL = "https://ios.prod.ftl.netflix.com/iosui/user/15.48"
@@ -419,7 +433,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Error in button_callback: {e}")
 
-# Background task for processing
 async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path, extract_dir):
     try:
         success, error_msg = extract_zip(file_path, extract_dir)
@@ -634,22 +647,38 @@ def main():
         print("❌ Please set BOT_TOKEN environment variable!")
         return
     
-    # Create application using the new method
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("about", about_command))
-    application.add_handler(CallbackQueryHandler(button_callback, pattern="^(send_file|help|about|back)$"))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    application.add_error_handler(error_handler)
-    
-    print("🤖 Netflix Cookie Checker Bot is running...")
-    print("Supported format: ZIP only")
-    print("Max file size: 5 MB")
-    print("Each account will be shown separately")
-    
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        # Create application
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("about", about_command))
+        application.add_handler(CallbackQueryHandler(button_callback, pattern="^(send_file|help|about|back)$"))
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+        application.add_error_handler(error_handler)
+        
+        print("🤖 Netflix Cookie Checker Bot is running...")
+        print("Supported format: ZIP only")
+        print("Max file size: 5 MB")
+        print("Each account will be shown separately")
+        
+        # Run the bot with proper event loop handling
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            loop.run_until_complete(application.run_polling(allowed_updates=Update.ALL_TYPES))
+        except KeyboardInterrupt:
+            print("Bot stopped by user")
+        finally:
+            loop.close()
+            
+    except Exception as e:
+        print(f"Error in main: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
