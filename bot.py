@@ -9,7 +9,6 @@ import requests
 import urllib.parse
 from datetime import datetime
 from threading import Lock
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -24,9 +23,9 @@ except Exception as e:
 
 # ============ PORT FIX FOR RENDER ============
 PORT = int(os.environ.get("PORT", 10000))
-print(f"✅ Server will run on port {PORT} (for health checks)")
+print(f"✅ Server will run on port {PORT}")
 
-# ============ KEEP ALIVE SERVER FOR RENDER ============
+# ============ KEEP ALIVE SERVER ============
 try:
     from http.server import HTTPServer, BaseHTTPRequestHandler
     import threading
@@ -51,17 +50,15 @@ try:
     keep_alive_thread.start()
     print("✅ Keep-alive server started")
 except Exception as e:
-    print(f"⚠️ Keep-alive server not started: {e}")
+    print(f"⚠️ Keep-alive not started: {e}")
 
 # ============ BOT CONFIGURATION ============
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
-    print("❌ BOT_TOKEN environment variable not set!")
+    print("❌ BOT_TOKEN not set!")
     sys.exit(1)
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
-MAX_WORKERS = 3  # 3 threads is the sweet spot for 512MB RAM
-CHUNK_SIZE = 30
 ZIP_THRESHOLD = 20
 
 # ============ NETFLIX CONFIGURATION ============
@@ -180,13 +177,11 @@ def fix_email_display(email):
 
 def extract_cookie_dict(text):
     cookie_dict = {}
-    # 1. Netscape
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         cookie_dict.update(parse_netscape_cookie_line(line))
-    # 2. JSON
     try:
         data = json.loads(text)
         if isinstance(data, list):
@@ -209,7 +204,6 @@ def extract_cookie_dict(text):
                         cookie_dict[name] = decode_cookie_value(value)
     except:
         pass
-    # 3. Direct search
     for key in COOKIE_KEYS:
         if key in cookie_dict:
             continue
@@ -384,7 +378,7 @@ def process_single_cookie_file(file_path):
     except Exception as e:
         return None
 
-# ============ FILE PROCESSING FUNCTIONS ============
+# ============ FILE FUNCTIONS ============
 def extract_zip(file_path, extract_path):
     try:
         with zipfile.ZipFile(file_path, 'r') as zip_ref:
@@ -472,7 +466,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🎬 **Netflix Cookie Checker Bot**\n\n"
         f"Send me a ZIP archive containing TXT files with Netflix cookies.\n\n"
-        f"⚡ **Processing {MAX_WORKERS} files in parallel**\n"
+        f"⚡ **Processing one file at a time (stable)**\n"
         f"⚠️ **Maximum file size: 5 MB**\n\n"
         f"📦 If results exceed {ZIP_THRESHOLD}, I'll send a ZIP file organized by status.",
         reply_markup=reply_markup,
@@ -489,7 +483,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📂 **Required Cookie Format:**\n"
         "• Netscape format or JSON\n"
         "• Must contain: NetflixId\n\n"
-        f"⚙️ **Processing:** {MAX_WORKERS} parallel threads\n"
         f"📦 **ZIP threshold:** {ZIP_THRESHOLD} accounts"
     )
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
@@ -504,8 +497,8 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ℹ️ **About Bot**\n\n"
         "Netflix Cookie Checker Bot\n"
         "Checks Netflix cookies and generates NFToken links.\n\n"
-        f"🔹 Version: 7.0 (Final Stable)\n"
-        f"🔹 Threads: {MAX_WORKERS}\n"
+        "🔹 Version: 8.0 (Final Stable)\n"
+        "🔹 Processing: Single file (stable)\n"
         f"🔹 ZIP threshold: {ZIP_THRESHOLD} accounts\n"
         "🔹 Organized folders: HIT, CUSTOM, FREE"
     )
@@ -560,7 +553,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"🎬 **Netflix Cookie Checker Bot**\n\n"
             f"Send me a ZIP archive containing TXT files with Netflix cookies.\n\n"
-            f"⚡ **Processing {MAX_WORKERS} files in parallel**\n"
+            f"⚡ **Processing one file at a time (stable)**\n"
             f"⚠️ **Maximum file size: 5 MB**",
             reply_markup=reply_markup,
             parse_mode="Markdown"
@@ -589,73 +582,73 @@ async def send_account_message(update, context, result, index, total):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(message, reply_markup=reply_markup, parse_mode="Markdown")
 
+# ============ PROCESS ZIP (SIMPLE - NO THREADS) ============
 async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path, extract_dir, status_msg):
     try:
+        # 1. Extract ZIP
         success, error_msg = extract_zip(file_path, extract_dir)
         if not success:
             await status_msg.edit_text(f"❌ Failed: {error_msg}", parse_mode="Markdown")
             return
+
+        # 2. Find TXT files
         txt_files = find_txt_files(extract_dir)
         if not txt_files:
             await status_msg.edit_text("❌ No TXT files found!", parse_mode="Markdown")
             return
+
         total_files = len(txt_files)
         results = []
         processed = 0
-        total_processed = 0
-        status_lock = Lock()
 
-        def update_status(completed):
-            nonlocal total_processed
-            with status_lock:
-                total_processed += completed
+        # 3. Process one by one (NO THREADS)
+        for file_path in txt_files:
+            try:
+                processed += 1
+                result = process_single_cookie_file(file_path)
 
-        # Parallel processing function
-        def process_batch(batch):
-            batch_results = []
-            for file_path in batch:
-                try:
-                    result = process_single_cookie_file(file_path)
-                    if result:
-                        batch_results.append(result)
-                        if result["status"] == "Active":
-                            counters.add_hit()
-                        elif result["status"] == "Canceled":
-                            counters.add_custom()
-                        elif result["status"] == "Free":
-                            counters.add_free()
-                    else:
-                        counters.add_bad()
-                except Exception as e:
+                if result:
+                    results.append(result)
+                    if result["status"] == "Active":
+                        counters.add_hit()
+                    elif result["status"] == "Canceled":
+                        counters.add_custom()
+                    elif result["status"] == "Free":
+                        counters.add_free()
+                else:
                     counters.add_bad()
-            return batch_results
 
-        # Process in batches
-        for i in range(0, total_files, CHUNK_SIZE):
-            batch = txt_files[i:i+CHUNK_SIZE]
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                future = executor.submit(process_batch, batch)
-                try:
-                    batch_results = future.result(timeout=60)
-                    results.extend(batch_results)
-                    processed += len(batch)
-                    await status_msg.edit_text(
-                        f"⏳ **Processing your file...**\n\n"
-                        f"📁 {processed}/{total_files} files checked\n"
-                        f"📊 {counters.get_stats()}",
-                        parse_mode="Markdown"
-                    )
-                except Exception as e:
-                    print(f"Batch timeout/error: {e}")
-                    continue
+                # Update status every file
+                await status_msg.edit_text(
+                    f"⏳ **Processing your file...**\n\n"
+                    f"📁 {processed}/{total_files} files checked\n"
+                    f"📊 {counters.get_stats()}",
+                    parse_mode="Markdown"
+                )
 
+                # Small delay to prevent flooding
+                await asyncio.sleep(0.05)
+
+            except Exception as e:
+                print(f"Error on file {processed}: {e}")
+                counters.add_bad()
+                continue
+
+        # 4. Delete status message
         await status_msg.delete()
 
+        # 5. Show results
         if not results:
-            await update.message.reply_text(f"❌ No valid accounts!\n\n📊 {counters.get_stats()}", parse_mode="Markdown")
+            await update.message.reply_text(
+                f"❌ No valid accounts found!\n\n"
+                f"📁 {total_files} files checked\n\n"
+                f"📊 {counters.get_stats()}",
+                parse_mode="Markdown"
+            )
             return
 
         if len(results) > ZIP_THRESHOLD:
+            # Send ZIP
             zip_path = create_results_zip(results)
             if zip_path and os.path.exists(zip_path):
                 with open(zip_path, 'rb') as f:
@@ -663,9 +656,10 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
                         document=f,
                         filename="netflix_results.zip",
                         caption=f"✅ **Scan Complete!**\n\n"
-                                f"📊 Total: {len(results)}\n"
-                                f"📁 Files: {total_files}\n\n"
-                                f"📊 {counters.get_stats()}",
+                                f"📊 Total accounts: {len(results)}\n"
+                                f"📁 Files checked: {total_files}\n\n"
+                                f"📊 {counters.get_stats()}\n\n"
+                                f"📦 ZIP organized by: HIT, CUSTOM, FREE",
                         parse_mode="Markdown"
                     )
                 try:
@@ -674,13 +668,27 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
                 except:
                     pass
             else:
+                # Fallback: send individual messages
                 for i, result in enumerate(results, 1):
                     await send_account_message(update, context, result, i, len(results))
-                await update.message.reply_text(f"✅ Done!\n\n📊 {counters.get_stats()}", parse_mode="Markdown")
+                await update.message.reply_text(
+                    f"✅ **Scan Complete!**\n\n"
+                    f"📊 Total accounts: {len(results)}\n"
+                    f"📁 Files checked: {total_files}\n\n"
+                    f"📊 {counters.get_stats()}",
+                    parse_mode="Markdown"
+                )
         else:
+            # Send individual messages
             for i, result in enumerate(results, 1):
                 await send_account_message(update, context, result, i, len(results))
-            await update.message.reply_text(f"✅ Done!\n\n📊 {counters.get_stats()}", parse_mode="Markdown")
+            await update.message.reply_text(
+                f"✅ **Scan Complete!**\n\n"
+                f"📊 Total accounts: {len(results)}\n"
+                f"📁 Files checked: {total_files}\n\n"
+                f"📊 {counters.get_stats()}",
+                parse_mode="Markdown"
+            )
 
     except Exception as e:
         await status_msg.edit_text(f"❌ Error: {str(e)}", parse_mode="Markdown")
@@ -693,24 +701,32 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         document = update.message.document
+
         if document.file_size > MAX_FILE_SIZE:
             await update.message.reply_text(f"❌ File too large! Max 5 MB", parse_mode="Markdown")
             return
+
         file_name = document.file_name or ""
         if not file_name.lower().endswith('.zip'):
             await update.message.reply_text("❌ Only ZIP files supported!", parse_mode="Markdown")
             return
+
         status_msg = await update.message.reply_text(
-            f"⏳ **Processing...**\n\n📊 {counters.get_stats()}",
+            f"⏳ **Processing your file...**\n\n"
+            f"📊 {counters.get_stats()}",
             parse_mode="Markdown"
         )
+
         temp_dir = tempfile.mkdtemp()
         extract_dir = os.path.join(temp_dir, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
+
         file_path = os.path.join(temp_dir, file_name)
         file = await context.bot.get_file(document.file_id)
         await file.download_to_drive(file_path)
+
         await process_zip_file(update, context, file_path, extract_dir, status_msg)
+
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}", parse_mode="Markdown")
 
@@ -721,6 +737,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     try:
         application = Application.builder().token(BOT_TOKEN).build()
+
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("about", about_command))
@@ -729,10 +746,14 @@ def main():
         application.add_handler(CallbackQueryHandler(button_callback, pattern="^(send_file|help|about|back|stats|reset_stats)$"))
         application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
         application.add_error_handler(error_handler)
+
         print("🤖 Netflix Cookie Checker Bot is running...")
-        print(f"✅ {MAX_WORKERS} parallel threads")
+        print("📦 Processing: One file at a time (STABLE)")
         print(f"📦 ZIP threshold: {ZIP_THRESHOLD}")
+        print("✅ No threads, no deadlocks!")
+
         application.run_polling(allowed_updates=Update.ALL_TYPES)
+
     except Exception as e:
         print(f"Error: {e}")
 
