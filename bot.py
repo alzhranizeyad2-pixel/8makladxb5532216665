@@ -634,6 +634,7 @@ def main():
         print("❌ Please set BOT_TOKEN environment variable!")
         return
     
+    # Create application using the new method
     application = Application.builder().token(BOT_TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
