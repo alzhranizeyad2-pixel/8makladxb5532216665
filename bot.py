@@ -118,7 +118,7 @@ if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
     sys.exit(1)
 
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
-BATCH_SIZE = 50  # Files per batch
+BATCH_SIZE = 20  # Files per batch (changed from 50 to 20)
 
 # ============ COUNTERS (GLOBAL) ============
 class GlobalCounters:
