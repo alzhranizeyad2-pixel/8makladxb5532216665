@@ -2,7 +2,6 @@ import os
 import sys
 import re
 import json
-import zipfile
 import tempfile
 import shutil
 import requests
@@ -14,36 +13,9 @@ import gc
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ============ PORT FIX FOR RENDER ============
+# ============ PORT FIX ============
 PORT = int(os.environ.get("PORT", 10000))
 print(f"✅ Server will run on port {PORT}")
-
-# ============ KEEP ALIVE SERVER ============
-try:
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    import threading
-
-    class KeepAliveHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"Bot is running!")
-        def log_message(self, format, *args):
-            pass
-
-    def run_keep_alive():
-        try:
-            port = int(os.environ.get("PORT", 10000))
-            server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
-            server.serve_forever()
-        except:
-            pass
-
-    keep_alive_thread = threading.Thread(target=run_keep_alive, daemon=True)
-    keep_alive_thread.start()
-    print("✅ Keep-alive server started")
-except Exception as e:
-    print(f"⚠️ Keep-alive not started: {e}")
 
 # ============ TELEGRAM IMPORTS ============
 try:
@@ -111,10 +83,7 @@ COOKIE_KEYS = ("NetflixId", "SecureNetflixId", "nfvdid", "OptanonConsent")
 REQUIRED_COOKIE = "NetflixId"
 
 # ============ BOT CONFIGURATION ============
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-    print("❌ Please set BOT_TOKEN environment variable!")
-    sys.exit(1)
+BOT_TOKEN = "7168370915:AAE-PfYTjsxPr5uKx62_M_ykp0Ek6uHQqq4"
 
 # ============ COUNTERS ============
 class Counters:
@@ -360,7 +329,6 @@ def process_single_cookie_file(file_path):
         
         account_info["email"] = fix_email_display(account_info["email"])
         
-        # Check if active
         if account_info["status"] == "Active":
             token, expires = get_nftoken_from_cookies(cookie_dict)
             if not token:
@@ -401,7 +369,6 @@ def process_single_cookie_file(file_path):
                 "time_left": time_left_str
             }
             
-            # Only return if plan_type is Premium, Standard, Basic, or Mobile
             if plan_type in ["Premium", "Standard", "Basic", "Mobile"]:
                 return result, "HIT"
             else:
@@ -442,7 +409,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         document = update.message.document
         
-        # Check if it's a TXT file
         file_name = document.file_name or ""
         if not file_name.lower().endswith('.txt'):
             await update.message.reply_text(
@@ -451,7 +417,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Check file size (max 1MB for single file)
         if document.file_size > 1 * 1024 * 1024:
             await update.message.reply_text(
                 f"❌ **File too large!**\n\nMax: 1 MB\nYour file: {document.file_size / (1024*1024):.2f} MB",
@@ -465,31 +430,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         
-        # Download the file
         temp_dir = tempfile.mkdtemp()
         file_path = os.path.join(temp_dir, file_name)
         file = await context.bot.get_file(document.file_id)
         await file.download_to_drive(file_path)
         
-        # Process the cookie file
         result, status = process_single_cookie_file(file_path)
         
-        # Clean up
         try:
             shutil.rmtree(temp_dir)
         except:
             pass
         
-        # Update counter and show result
         if status == "HIT":
             counters.add_hit()
             await status_msg.delete()
             
-            # Get status emoji
             status_emoji = "✅"
             plan_emoji = "🟣" if result["plan_type"] == "Premium" else "🔵" if result["plan_type"] == "Standard" else "🟢" if result["plan_type"] == "Basic" else "📱"
             
-            # Send account info with NFToken links
             message = (
                 f"🎬 **Netflix Hit**\n"
                 f"💎 **SUBSCRIPTION**\n"
