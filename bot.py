@@ -9,11 +9,11 @@ import asyncio
 import requests
 import urllib.parse
 from datetime import datetime
+from threading import Lock
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ============ FIX FOR PYTHON 3.14 ============
-# Ensure event loop exists for Python 3.14+
 try:
     asyncio.get_running_loop()
 except RuntimeError:
@@ -90,6 +90,44 @@ REQUIRED_COOKIE = "NetflixId"
 # ============ BOT CONFIGURATION ============
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+
+# ============ COUNTERS ============
+class Counters:
+    def __init__(self):
+        self.hit = 0
+        self.custom = 0
+        self.free = 0
+        self.bad = 0
+        self.lock = Lock()
+    
+    def get_stats(self):
+        with self.lock:
+            return f"HIT: {self.hit} | CUSTOM: {self.custom} | FREE: {self.free} | BAD: {self.bad}"
+    
+    def add_hit(self):
+        with self.lock:
+            self.hit += 1
+    
+    def add_custom(self):
+        with self.lock:
+            self.custom += 1
+    
+    def add_free(self):
+        with self.lock:
+            self.free += 1
+    
+    def add_bad(self):
+        with self.lock:
+            self.bad += 1
+    
+    def reset(self):
+        with self.lock:
+            self.hit = 0
+            self.custom = 0
+            self.free = 0
+            self.bad = 0
+
+counters = Counters()
 
 # ============ COOKIE EXTRACTION FUNCTIONS ============
 def parse_netscape_cookie_line(line):
@@ -326,6 +364,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📦 Send ZIP File", callback_data="send_file")],
         [InlineKeyboardButton("📖 How to Use", callback_data="help")],
         [InlineKeyboardButton("ℹ️ About Bot", callback_data="about")],
+        [InlineKeyboardButton("📊 Stats", callback_data="stats")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -376,10 +415,11 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ℹ️ **About Bot**\n\n"
         "Netflix Cookie Checker Bot\n"
         "Checks Netflix cookies and generates NFToken links.\n\n"
-        "🔹 Version: 2.0\n"
+        "🔹 Version: 3.0\n"
         "🔹 Supports: ZIP only\n"
         "🔹 Max file size: 5 MB\n"
-        "🔹 Each account shown separately"
+        "🔹 Each account shown separately\n"
+        "🔹 Live statistics during scanning"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
@@ -396,6 +436,36 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(about_text, reply_markup=reply_markup, parse_mode="Markdown")
     except Exception as e:
         print(f"Error in about_command: {e}")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    stats_text = (
+        "📊 **Current Statistics**\n\n"
+        f"{counters.get_stats()}\n\n"
+        "🔄 Use /resetstats to reset counters"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 Reset Stats", callback_data="reset_stats")],
+        [InlineKeyboardButton("🔙 Back", callback_data="back")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    try:
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                stats_text,
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(stats_text, reply_markup=reply_markup, parse_mode="Markdown")
+    except Exception as e:
+        print(f"Error in stats_command: {e}")
+
+async def reset_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    counters.reset()
+    await update.callback_query.answer("📊 Statistics reset successfully!", show_alert=True)
+    await stats_command(update, context)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -416,11 +486,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif query.data == "about":
             await about_command(update, context)
         
+        elif query.data == "stats":
+            await stats_command(update, context)
+        
+        elif query.data == "reset_stats":
+            await reset_stats_command(update, context)
+        
         elif query.data == "back":
             keyboard = [
                 [InlineKeyboardButton("📦 Send ZIP File", callback_data="send_file")],
                 [InlineKeyboardButton("📖 How to Use", callback_data="help")],
                 [InlineKeyboardButton("ℹ️ About Bot", callback_data="about")],
+                [InlineKeyboardButton("📊 Stats", callback_data="stats")],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
@@ -433,12 +510,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Error in button_callback: {e}")
 
-async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path, extract_dir):
+async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_path, extract_dir, status_msg):
     try:
         success, error_msg = extract_zip(file_path, extract_dir)
         
         if not success:
-            await update.message.reply_text(
+            await status_msg.edit_text(
                 f"❌ **Failed to extract archive!**\n\n{error_msg}",
                 parse_mode="Markdown"
             )
@@ -447,7 +524,7 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
         txt_files = find_txt_files(extract_dir)
         
         if not txt_files:
-            await update.message.reply_text(
+            await status_msg.edit_text(
                 "❌ **No TXT files found!**\n\nThe archive doesn't contain any TXT files.",
                 parse_mode="Markdown"
             )
@@ -462,30 +539,53 @@ async def process_zip_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f
                 total_checked += 1
                 if result:
                     results.append(result)
+                    if result["status"] == "Active":
+                        counters.add_hit()
+                    elif result["status"] == "Canceled":
+                        counters.add_custom()
+                    elif result["status"] == "Free":
+                        counters.add_free()
+                else:
+                    counters.add_bad()
+                
+                # Update status message with live stats
+                await status_msg.edit_text(
+                    f"⏳ **Processing your file...**\n\n"
+                    f"📁 {total_checked}/{len(txt_files)} files checked\n"
+                    f"📊 {counters.get_stats()}",
+                    parse_mode="Markdown"
+                )
             except Exception as e:
                 print(f"Error processing file {txt_file}: {e}")
+                counters.add_bad()
                 continue
+        
+        # Delete status message
+        await status_msg.delete()
         
         if not results:
             await update.message.reply_text(
                 "❌ **No valid accounts found!**\n\n"
                 f"Total files checked: {total_checked}\n\n"
-                "Make sure your cookies contain valid NetflixId.",
+                f"📊 {counters.get_stats()}",
                 parse_mode="Markdown"
             )
         else:
+            # Send each account as a separate message
             for i, result in enumerate(results, 1):
                 await send_account_message(update, context, result, i, len(results))
             
+            # Send summary with stats
             await update.message.reply_text(
                 f"✅ **Scan Complete!**\n\n"
                 f"📊 Total accounts found: {len(results)}\n"
-                f"📁 Files checked: {total_checked}",
+                f"📁 Files checked: {total_checked}\n\n"
+                f"📊 {counters.get_stats()}",
                 parse_mode="Markdown"
             )
             
     except Exception as e:
-        await update.message.reply_text(
+        await status_msg.edit_text(
             f"❌ **Error processing file!**\n\n{str(e)}",
             parse_mode="Markdown"
         )
@@ -516,9 +616,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        await update.message.reply_text(
-            "⏳ **Processing your file...**\n\n"
-            "I'll notify you when the scan is complete.",
+        # Send status message with initial stats
+        status_msg = await update.message.reply_text(
+            f"⏳ **Processing your file...**\n\n"
+            f"📊 {counters.get_stats()}",
             parse_mode="Markdown"
         )
         
@@ -530,7 +631,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(document.file_id)
         await file.download_to_drive(file_path)
         
-        asyncio.create_task(process_zip_file(update, context, file_path, extract_dir))
+        asyncio.create_task(process_zip_file(update, context, file_path, extract_dir, status_msg))
         
     except Exception as e:
         print(f"Error in handle_document: {e}")
@@ -648,23 +749,24 @@ def main():
         return
     
     try:
-        # Create application
         application = Application.builder().token(BOT_TOKEN).build()
         
         # Add handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("about", about_command))
-        application.add_handler(CallbackQueryHandler(button_callback, pattern="^(send_file|help|about|back)$"))
+        application.add_handler(CommandHandler("stats", stats_command))
+        application.add_handler(CommandHandler("resetstats", reset_stats_command))
+        application.add_handler(CallbackQueryHandler(button_callback, pattern="^(send_file|help|about|back|stats|reset_stats)$"))
         application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
         application.add_error_handler(error_handler)
         
         print("🤖 Netflix Cookie Checker Bot is running...")
         print("Supported format: ZIP only")
         print("Max file size: 5 MB")
-        print("Each account will be shown separately")
+        print("Live statistics enabled!")
         
-        # Run the bot with proper event loop handling
+        # Run the bot
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
