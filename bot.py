@@ -1,13 +1,19 @@
+import os
 import json
 import re
 import urllib.parse
-import os
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
 import requests
 from urllib3.exceptions import InsecureRequestWarning
+
+# ============ ENVIRONMENT VARIABLES ============
+PORT = int(os.environ.get("PORT", 10000))
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", f"https://eightmakladxb5532216665.onrender.com")
+
+print(f"🚀 Starting bot on port: {PORT}")
+print(f"🌐 Webhook URL: {RENDER_EXTERNAL_URL}")
 
 # Bot Token
 BOT_TOKEN = "7168370915:AAE-PfYTjsxPr5uKx62_M_ykp0Ek6uHQqq4"
@@ -82,6 +88,8 @@ COOKIE_KEYS = ("NetflixId", "SecureNetflixId", "nfvdid", "OptanonConsent")
 REQUIRED_COOKIE = "NetflixId"
 
 # Country Flags
+
+# Country Flags
 FLAG_MAP = {
     "AF": "🇦🇫", "AX": "🇦🇽", "AL": "🇦🇱", "DZ": "🇩🇿", "AS": "🇦🇸",
     "AD": "🇦🇩", "AO": "🇦🇴", "AI": "🇦🇮", "AQ": "🇦🇶", "AG": "🇦🇬",
@@ -136,75 +144,6 @@ FLAG_MAP = {
 }
 
 
-# ==================== COUNTRY_CODES ====================
-COUNTRY_CODES = {
-    "AF": "Afghanistan", "AX": "Aland Islands", "AL": "Albania", "DZ": "Algeria",
-    "AS": "American Samoa", "AD": "Andorra", "AO": "Angola", "AI": "Anguilla",
-    "AQ": "Antarctica", "AG": "Antigua and Barbuda", "AR": "Argentina", "AM": "Armenia",
-    "AW": "Aruba", "AU": "Australia", "AT": "Austria", "AZ": "Azerbaijan",
-    "BS": "Bahamas", "BH": "Bahrain", "BD": "Bangladesh", "BB": "Barbados",
-    "BY": "Belarus", "BE": "Belgium", "BZ": "Belize", "BJ": "Benin",
-    "BM": "Bermuda", "BT": "Bhutan", "BO": "Bolivia", "BQ": "Bonaire, Sint Eustatius and Saba",
-    "BA": "Bosnia and Herzegovina", "BW": "Botswana", "BV": "Bouvet Island", "BR": "Brazil",
-    "IO": "British Indian Ocean Territory", "BN": "Brunei Darussalam", "BG": "Bulgaria",
-    "BF": "Burkina Faso", "BI": "Burundi", "CV": "Cabo Verde", "KH": "Cambodia",
-    "CM": "Cameroon", "CA": "Canada", "KY": "Cayman Islands", "CF": "Central African Republic",
-    "TD": "Chad", "CL": "Chile", "CN": "China", "CX": "Christmas Island",
-    "CC": "Cocos (Keeling) Islands", "CO": "Colombia", "KM": "Comoros", "CG": "Congo",
-    "CD": "Congo, Democratic Republic of the", "CK": "Cook Islands", "CR": "Costa Rica",
-    "CI": "Cote d'Ivoire", "HR": "Croatia", "CU": "Cuba", "CW": "Curacao",
-    "CY": "Cyprus", "CZ": "Czech Republic", "DK": "Denmark", "DJ": "Djibouti",
-    "DM": "Dominica", "DO": "Dominican Republic", "EC": "Ecuador", "EG": "Egypt",
-    "SV": "El Salvador", "GQ": "Equatorial Guinea", "ER": "Eritrea", "EE": "Estonia",
-    "SZ": "Eswatini", "ET": "Ethiopia", "FK": "Falkland Islands", "FO": "Faroe Islands",
-    "FJ": "Fiji", "FI": "Finland", "FR": "France", "GF": "French Guiana",
-    "PF": "French Polynesia", "TF": "French Southern Territories", "GA": "Gabon",
-    "GM": "Gambia", "GE": "Georgia", "DE": "Germany", "GH": "Ghana",
-    "GI": "Gibraltar", "GR": "Greece", "GL": "Greenland", "GD": "Grenada",
-    "GP": "Guadeloupe", "GU": "Guam", "GT": "Guatemala", "GG": "Guernsey",
-    "GN": "Guinea", "GW": "Guinea-Bissau", "GY": "Guyana", "HT": "Haiti",
-    "HM": "Heard Island and McDonald Islands", "VA": "Holy See (Vatican City State)",
-    "HN": "Honduras", "HK": "Hong Kong", "HU": "Hungary", "IS": "Iceland",
-    "IN": "India", "ID": "Indonesia", "IR": "Iran", "IQ": "Iraq",
-    "IE": "Ireland", "IM": "Isle of Man", "IL": "Israel", "IT": "Italy",
-    "JM": "Jamaica", "JP": "Japan", "JE": "Jersey", "JO": "Jordan",
-    "KZ": "Kazakhstan", "KE": "Kenya", "KI": "Kiribati", "KR": "South Korea",
-    "KW": "Kuwait", "KG": "Kyrgyzstan", "LA": "Laos", "LV": "Latvia",
-    "LB": "Lebanon", "LS": "Lesotho", "LR": "Liberia", "LY": "Libya",
-    "LI": "Liechtenstein", "LT": "Lithuania", "LU": "Luxembourg", "MO": "Macau",
-    "MG": "Madagascar", "MW": "Malawi", "MY": "Malaysia", "MV": "Maldives",
-    "ML": "Mali", "MT": "Malta", "MH": "Marshall Islands", "MQ": "Martinique",
-    "MR": "Mauritania", "MU": "Mauritius", "YT": "Mayotte", "MX": "Mexico",
-    "FM": "Micronesia", "MD": "Moldova", "MC": "Monaco", "MN": "Mongolia",
-    "ME": "Montenegro", "MS": "Montserrat", "MA": "Morocco", "MZ": "Mozambique",
-    "MM": "Myanmar", "NA": "Namibia", "NR": "Nauru", "NP": "Nepal",
-    "NL": "Netherlands", "NC": "New Caledonia", "NZ": "New Zealand", "NI": "Nicaragua",
-    "NE": "Niger", "NG": "Nigeria", "NU": "Niue", "NF": "Norfolk Island",
-    "MK": "North Macedonia", "MP": "Northern Mariana Islands", "NO": "Norway",
-    "OM": "Oman", "PK": "Pakistan", "PW": "Palau", "PS": "Palestine",
-    "PA": "Panama", "PG": "Papua New Guinea", "PY": "Paraguay", "PE": "Peru",
-    "PH": "Philippines", "PN": "Pitcairn", "PL": "Poland", "PT": "Portugal",
-    "PR": "Puerto Rico", "QA": "Qatar", "RE": "Reunion", "RO": "Romania",
-    "RU": "Russian Federation", "RW": "Rwanda", "BL": "Saint Barthelemy",
-    "SH": "Saint Helena, Ascension and Tristan da Cunha", "KN": "Saint Kitts and Nevis",
-    "LC": "Saint Lucia", "MF": "Saint Martin (French part)", "PM": "Saint Pierre and Miquelon",
-    "VC": "Saint Vincent and the Grenadines", "WS": "Samoa", "SM": "San Marino",
-    "ST": "Sao Tome and Principe", "SA": "Saudi Arabia", "SN": "Senegal",
-    "RS": "Serbia", "SC": "Seychelles", "SL": "Sierra Leone", "SG": "Singapore",
-    "SX": "Sint Maarten", "SK": "Slovakia", "SI": "Slovenia", "SB": "Solomon Islands",
-    "SO": "Somalia", "ZA": "South Africa", "GS": "South Georgia and the South Sandwich Islands",
-    "SS": "South Sudan", "ES": "Spain", "LK": "Sri Lanka", "SD": "Sudan",
-    "SR": "Suriname", "SJ": "Svalbard and Jan Mayen", "SE": "Sweden", "CH": "Switzerland",
-    "SY": "Syrian Arab Republic", "TW": "Taiwan", "TJ": "Tajikistan", "TZ": "Tanzania",
-    "TH": "Thailand", "TL": "Timor-Leste", "TG": "Togo", "TK": "Tokelau",
-    "TO": "Tonga", "TT": "Trinidad and Tobago", "TN": "Tunisia", "TR": "Turkey",
-    "TM": "Turkmenistan", "TC": "Turks and Caicos Islands", "TV": "Tuvalu",
-    "UG": "Uganda", "UA": "Ukraine", "AE": "United Arab Emirates", "GB": "United Kingdom",
-    "US": "United States", "UM": "United States Minor Outlying Islands", "UY": "Uruguay",
-    "UZ": "Uzbekistan", "VU": "Vanuatu", "VE": "Venezuela", "VN": "Vietnam",
-    "VG": "Virgin Islands (British)", "VI": "Virgin Islands (U.S.)", "WF": "Wallis and Futuna",
-    "EH": "Western Sahara", "YE": "Yemen", "ZM": "Zambia", "ZW": "Zimbabwe"
-}
 
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 
@@ -847,11 +786,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    print("🤖 Bot is starting...")
-    
-    # ============ PORT FIX ============
-    PORT = int(os.environ.get("PORT", 10000))
-    print(f"✅ Server will run on port {PORT}")
+    print("🤖 Netflix Token Bot is starting...")
+    print(f"📡 Port: {PORT}")
+    print(f"🌐 Webhook URL: {RENDER_EXTERNAL_URL}")
 
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -859,8 +796,24 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cookies))
 
-    print("✅ Bot is running! 🚀")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # ============ RUN WITH WEBHOOK ============
+    webhook_path = f"/webhook/{BOT_TOKEN}"
+    full_webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
+    
+    print(f"✅ Setting webhook to: {full_webhook_url}")
+    
+    # Set webhook
+    application.bot.set_webhook(url=full_webhook_url)
+    
+    print(f"✅ Bot is running with webhook on port {PORT} 🚀")
+    
+    # Run webhook
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=full_webhook_url,
+        allowed_updates=Update.ALL_TYPES
+    )
 
 
 if __name__ == "__main__":
