@@ -84,6 +84,7 @@ ACCOUNT_HEADERS = {
 COOKIE_KEYS = ("NetflixId", "SecureNetflixId", "nfvdid", "OptanonConsent")
 REQUIRED_COOKIE = "NetflixId"
 
+
 FLAG_MAP = {
     "AF": "🇦🇫", "AX": "🇦🇽", "AL": "🇦🇱", "DZ": "🇩🇿", "AS": "🇦🇸",
     "AD": "🇦🇩", "AO": "🇦🇴", "AI": "🇦🇮", "AQ": "🇦🇶", "AG": "🇦🇬",
@@ -566,10 +567,8 @@ def extract_all_netflix_data(response):
 
 
 def fetch_account_info(cookie_dict):
-    """Fetch account info from netflix.com/account"""
     url = "https://www.netflix.com/account"
     
-    # Build cookie string
     cookies = {}
     for key in COOKIE_KEYS:
         if key in cookie_dict and cookie_dict[key]:
@@ -586,11 +585,8 @@ def fetch_account_info(cookie_dict):
         )
         response.raise_for_status()
         response_text = response.text
-        
-        # Extract data using the functions
         data = extract_all_netflix_data(response_text)
         return data
-        
     except Exception as e:
         print(f"Error fetching account info: {e}")
         return None
@@ -692,17 +688,13 @@ async def handle_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Get token from API
         token, expires = fetch_nftoken(cookie_dict)
-        
-        # Get account info from netflix.com/account
         account_info = fetch_account_info(cookie_dict)
         
         pc_link = build_nftoken_link_pc(token)
         phone_link = build_nftoken_link_phone(token)
         expiry_str = format_expiry(expires)
         
-        # Use account info or fallback to Unknown
         if account_info:
             country_code = account_info.get('country', 'unknown')
             flag = FLAG_MAP.get(country_code, '🌍')
@@ -735,7 +727,6 @@ async def handle_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔗 *Login Links:*"
             )
         else:
-            # Fallback if account info fetch fails
             message = (
                 f"✅ *Token Generated Successfully!*\n\n"
                 f"⚠️ *Could not fetch account details.*\n"
@@ -743,7 +734,6 @@ async def handle_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔗 *Login Links:*"
             )
 
-        # Create buttons
         keyboard = [
             [InlineKeyboardButton("💻 PC / Browser", url=pc_link)],
             [InlineKeyboardButton("📱 Phone / Mobile", url=phone_link)],
@@ -781,14 +771,20 @@ def main():
     print("🤖 Netflix Token Bot is starting...")
     print(f"📡 Port: {PORT}")
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    try:
+        application = Application.builder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cookies))
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cookies))
 
-    print("✅ Bot is running with polling! 🚀")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+        print("✅ Bot is running with polling! 🚀")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        # Keep the process alive so Render can see it
+        import time
+        time.sleep(3600)
 
 
 if __name__ == "__main__":
