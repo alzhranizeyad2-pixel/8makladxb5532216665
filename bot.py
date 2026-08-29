@@ -7,6 +7,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import requests
 from urllib3.exceptions import InsecureRequestWarning
+import http.server
+import threading
 
 # ============ PORT FIX ============
 PORT = int(os.environ.get("PORT", 10000))
@@ -655,6 +657,22 @@ def format_expiry(expires):
         return str(expires)
 
 
+# ==================== Keep Alive Server ====================
+class KeepAliveHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+def run_keep_alive():
+    """Run a simple HTTP server to keep the port open"""
+    try:
+        server = http.server.HTTPServer(("0.0.0.0", PORT), KeepAliveHandler)
+        print(f"✅ Keep-alive server running on port {PORT}")
+        server.serve_forever()
+    except Exception as e:
+        print(f"⚠️ Keep-alive server error: {e}")
+
 # ==================== Telegram Bot Handlers ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -771,20 +789,19 @@ def main():
     print("🤖 Netflix Token Bot is starting...")
     print(f"📡 Port: {PORT}")
 
-    try:
-        application = Application.builder().token(BOT_TOKEN).build()
+    # Start keep-alive server in background thread
+    keep_alive_thread = threading.Thread(target=run_keep_alive, daemon=True)
+    keep_alive_thread.start()
 
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cookies))
+    # Start Telegram bot
+    application = Application.builder().token(BOT_TOKEN).build()
 
-        print("✅ Bot is running with polling! 🚀")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        # Keep the process alive so Render can see it
-        import time
-        time.sleep(3600)
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cookies))
+
+    print("✅ Bot is running with polling! 🚀")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
