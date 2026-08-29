@@ -9,6 +9,7 @@ import requests
 from urllib3.exceptions import InsecureRequestWarning
 import http.server
 import threading
+import asyncio
 
 # ============ PORT FIX ============
 PORT = int(os.environ.get("PORT", 10000))
@@ -785,7 +786,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def main():
+async def run_bot():
+    """Run the bot asynchronously"""
     print("🤖 Netflix Token Bot is starting...")
     print(f"📡 Port: {PORT}")
 
@@ -793,7 +795,7 @@ def main():
     keep_alive_thread = threading.Thread(target=run_keep_alive, daemon=True)
     keep_alive_thread.start()
 
-    # Start Telegram bot
+    # Create application
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -801,7 +803,25 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cookies))
 
     print("✅ Bot is running with polling! 🚀")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    # Start polling
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    # Keep the bot running
+    while True:
+        await asyncio.sleep(1)
+
+
+def main():
+    """Main entry point"""
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        print("Bot stopped by user")
+    except Exception as e:
+        print(f"Error: {e}")
 
 
 if __name__ == "__main__":
