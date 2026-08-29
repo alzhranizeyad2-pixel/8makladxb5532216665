@@ -8,12 +8,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import requests
 from urllib3.exceptions import InsecureRequestWarning
 
-# ============ ENVIRONMENT VARIABLES ============
+# ============ PORT FIX ============
 PORT = int(os.environ.get("PORT", 10000))
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", f"https://eightmakladxb5532216665.onrender.com")
-
 print(f"🚀 Starting bot on port: {PORT}")
-print(f"🌐 Webhook URL: {RENDER_EXTERNAL_URL}")
 
 # Bot Token
 BOT_TOKEN = "7168370915:AAE-PfYTjsxPr5uKx62_M_ykp0Ek6uHQqq4"
@@ -87,9 +84,6 @@ ACCOUNT_HEADERS = {
 COOKIE_KEYS = ("NetflixId", "SecureNetflixId", "nfvdid", "OptanonConsent")
 REQUIRED_COOKIE = "NetflixId"
 
-# Country Flags
-
-# Country Flags
 FLAG_MAP = {
     "AF": "🇦🇫", "AX": "🇦🇽", "AL": "🇦🇱", "DZ": "🇩🇿", "AS": "🇦🇸",
     "AD": "🇦🇩", "AO": "🇦🇴", "AI": "🇦🇮", "AQ": "🇦🇶", "AG": "🇦🇬",
@@ -142,8 +136,6 @@ FLAG_MAP = {
     "VN": "🇻🇳", "VG": "🇻🇬", "VI": "🇻🇮", "WF": "🇼🇫", "EH": "🇪🇭",
     "YE": "🇾🇪", "ZM": "🇿🇲", "ZW": "🇿🇼"
 }
-
-
 
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 
@@ -788,7 +780,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     print("🤖 Netflix Token Bot is starting...")
     print(f"📡 Port: {PORT}")
-    print(f"🌐 Webhook URL: {RENDER_EXTERNAL_URL}")
 
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -796,24 +787,8 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cookies))
 
-    # ============ RUN WITH WEBHOOK ============
-    webhook_path = f"/webhook/{BOT_TOKEN}"
-    full_webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
-    
-    print(f"✅ Setting webhook to: {full_webhook_url}")
-    
-    # Set webhook
-    application.bot.set_webhook(url=full_webhook_url)
-    
-    print(f"✅ Bot is running with webhook on port {PORT} 🚀")
-    
-    # Run webhook
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=full_webhook_url,
-        allowed_updates=Update.ALL_TYPES
-    )
+    print("✅ Bot is running with polling! 🚀")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
