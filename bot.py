@@ -1,31 +1,17 @@
-import os
-import sys
-import re
 import json
-import tempfile
-import shutil
-import requests
+import re
 import urllib.parse
+import os
 from datetime import datetime
-from threading import Lock
-import time
-import gc
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ============ PORT FIX ============
-PORT = int(os.environ.get("PORT", 10000))
-print(f"✅ Server will run on port {PORT}")
+import requests
+from urllib3.exceptions import InsecureRequestWarning
 
-# ============ TELEGRAM IMPORTS ============
-try:
-    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-    from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
-except Exception as e:
-    print(f"❌ Telegram import error: {e}")
-    sys.exit(1)
+# Bot Token
+BOT_TOKEN = "7168370915:AAE-PfYTjsxPr5uKx62_M_ykp0Ek6uHQqq4"
 
-# ============ NETFLIX CONFIGURATION ============
 API_URL = "https://ios.prod.ftl.netflix.com/iosui/user/15.48"
 
 QUERY_PARAMS = {
@@ -79,58 +65,253 @@ BASE_HEADERS = {
     "x-netflix.request.client.timezoneid": "Asia/Dhaka",
 }
 
+ACCOUNT_HEADERS = {
+    "Host": "www.netflix.com",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Referer": "https://www.netflix.com/browse",
+    "Upgrade-Insecure-Requests": "1",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache"
+}
+
 COOKIE_KEYS = ("NetflixId", "SecureNetflixId", "nfvdid", "OptanonConsent")
 REQUIRED_COOKIE = "NetflixId"
 
-# ============ BOT CONFIGURATION ============
-BOT_TOKEN = "7168370915:AAE-PfYTjsxPr5uKx62_M_ykp0Ek6uHQqq4"
+# Country Flags
+FLAG_MAP = {
+    "AF": "🇦🇫", "AX": "🇦🇽", "AL": "🇦🇱", "DZ": "🇩🇿", "AS": "🇦🇸",
+    "AD": "🇦🇩", "AO": "🇦🇴", "AI": "🇦🇮", "AQ": "🇦🇶", "AG": "🇦🇬",
+    "AR": "🇦🇷", "AM": "🇦🇲", "AW": "🇦🇼", "AU": "🇦🇺", "AT": "🇦🇹",
+    "AZ": "🇦🇿", "BS": "🇧🇸", "BH": "🇧🇭", "BD": "🇧🇩", "BB": "🇧🇧",
+    "BY": "🇧🇾", "BE": "🇧🇪", "BZ": "🇧🇿", "BJ": "🇧🇯", "BM": "🇧🇲",
+    "BT": "🇧🇹", "BO": "🇧🇴", "BA": "🇧🇦", "BW": "🇧🇼", "BV": "🇧🇻",
+    "BR": "🇧🇷", "IO": "🇮🇴", "BN": "🇧🇳", "BG": "🇧🇬", "BF": "🇧🇫",
+    "BI": "🇧🇮", "CV": "🇨🇻", "KH": "🇰🇭", "CM": "🇨🇲", "CA": "🇨🇦",
+    "KY": "🇰🇾", "CF": "🇨🇫", "TD": "🇹🇩", "CL": "🇨🇱", "CN": "🇨🇳",
+    "CX": "🇨🇽", "CC": "🇨🇨", "CO": "🇨🇴", "KM": "🇰🇲", "CG": "🇨🇬",
+    "CD": "🇨🇩", "CK": "🇨🇰", "CR": "🇨🇷", "CI": "🇨🇮", "HR": "🇭🇷",
+    "CU": "🇨🇺", "CW": "🇨🇼", "CY": "🇨🇾", "CZ": "🇨🇿", "DK": "🇩🇰",
+    "DJ": "🇩🇯", "DM": "🇩🇲", "DO": "🇩🇴", "EC": "🇪🇨", "EG": "🇪🇬",
+    "SV": "🇸🇻", "GQ": "🇬🇶", "ER": "🇪🇷", "EE": "🇪🇪", "SZ": "🇸🇿",
+    "ET": "🇪🇹", "FK": "🇫🇰", "FO": "🇫🇴", "FJ": "🇫🇯", "FI": "🇫🇮",
+    "FR": "🇫🇷", "GF": "🇬🇫", "PF": "🇵🇫", "TF": "🇹🇫", "GA": "🇬🇦",
+    "GM": "🇬🇲", "GE": "🇬🇪", "DE": "🇩🇪", "GH": "🇬🇭", "GI": "🇬🇮",
+    "GR": "🇬🇷", "GL": "🇬🇱", "GD": "🇬🇩", "GP": "🇬🇵", "GU": "🇬🇺",
+    "GT": "🇬🇹", "GG": "🇬🇬", "GN": "🇬🇳", "GW": "🇬🇼", "GY": "🇬🇾",
+    "HT": "🇭🇹", "HM": "🇭🇲", "VA": "🇻🇦", "HN": "🇭🇳", "HK": "🇭🇰",
+    "HU": "🇭🇺", "IS": "🇮🇸", "IN": "🇮🇳", "ID": "🇮🇩", "IR": "🇮🇷",
+    "IQ": "🇮🇶", "IE": "🇮🇪", "IM": "🇮🇲", "IL": "🇮🇱", "IT": "🇮🇹",
+    "JM": "🇯🇲", "JP": "🇯🇵", "JE": "🇯🇪", "JO": "🇯🇴", "KZ": "🇰🇿",
+    "KE": "🇰🇪", "KI": "🇰🇮", "KP": "🇰🇵", "KR": "🇰🇷", "KW": "🇰🇼",
+    "KG": "🇰🇬", "LA": "🇱🇦", "LV": "🇱🇻", "LB": "🇱🇧", "LS": "🇱🇸",
+    "LR": "🇱🇷", "LY": "🇱🇾", "LI": "🇱🇮", "LT": "🇱🇹", "LU": "🇱🇺",
+    "MO": "🇲🇴", "MG": "🇲🇬", "MW": "🇲🇼", "MY": "🇲🇾", "MV": "🇲🇻",
+    "ML": "🇲🇱", "MT": "🇲🇹", "MH": "🇲🇭", "MQ": "🇲🇶", "MR": "🇲🇷",
+    "MU": "🇲🇺", "YT": "🇾🇹", "MX": "🇲🇽", "FM": "🇫🇲", "MD": "🇲🇩",
+    "MC": "🇲🇨", "MN": "🇲🇳", "ME": "🇲🇪", "MS": "🇲🇸", "MA": "🇲🇦",
+    "MZ": "🇲🇿", "MM": "🇲🇲", "NA": "🇳🇦", "NR": "🇳🇷", "NP": "🇳🇵",
+    "NL": "🇳🇱", "NC": "🇳🇨", "NZ": "🇳🇿", "NI": "🇳🇮", "NE": "🇳🇪",
+    "NG": "🇳🇬", "NU": "🇳🇺", "NF": "🇳🇫", "MK": "🇲🇰", "MP": "🇲🇵",
+    "NO": "🇳🇴", "OM": "🇴🇲", "PK": "🇵🇰", "PW": "🇵🇼", "PS": "🇵🇸",
+    "PA": "🇵🇦", "PG": "🇵🇬", "PY": "🇵🇾", "PE": "🇵🇪", "PH": "🇵🇭",
+    "PN": "🇵🇳", "PL": "🇵🇱", "PT": "🇵🇹", "PR": "🇵🇷", "QA": "🇶🇦",
+    "RE": "🇷🇪", "RO": "🇷🇴", "RU": "🇷🇺", "RW": "🇷🇼", "BL": "🇧🇱",
+    "SH": "🇸🇭", "KN": "🇰🇳", "LC": "🇱🇨", "MF": "🇲🇫", "PM": "🇵🇲",
+    "VC": "🇻🇨", "WS": "🇼🇸", "SM": "🇸🇲", "ST": "🇸🇹", "SA": "🇸🇦",
+    "SN": "🇸🇳", "RS": "🇷🇸", "SC": "🇸🇨", "SL": "🇸🇱", "SG": "🇸🇬",
+    "SX": "🇸🇽", "SK": "🇸🇰", "SI": "🇸🇮", "SB": "🇸🇧", "SO": "🇸🇴",
+    "ZA": "🇿🇦", "GS": "🇬🇸", "SS": "🇸🇸", "ES": "🇪🇸", "LK": "🇱🇰",
+    "SD": "🇸🇩", "SR": "🇸🇷", "SJ": "🇸🇯", "SE": "🇸🇪", "CH": "🇨🇭",
+    "SY": "🇸🇾", "TW": "🇹🇼", "TJ": "🇹🇯", "TZ": "🇹🇿", "TH": "🇹🇭",
+    "TL": "🇹🇱", "TG": "🇹🇬", "TK": "🇹🇰", "TO": "🇹🇴", "TT": "🇹🇹",
+    "TN": "🇹🇳", "TR": "🇹🇷", "TM": "🇹🇲", "TC": "🇹🇨", "TV": "🇹🇻",
+    "UG": "🇺🇬", "UA": "🇺🇦", "AE": "🇦🇪", "GB": "🇬🇧", "US": "🇺🇸",
+    "UM": "🇺🇲", "UY": "🇺🇾", "UZ": "🇺🇿", "VU": "🇻🇺", "VE": "🇻🇪",
+    "VN": "🇻🇳", "VG": "🇻🇬", "VI": "🇻🇮", "WF": "🇼🇫", "EH": "🇪🇭",
+    "YE": "🇾🇪", "ZM": "🇿🇲", "ZW": "🇿🇼"
+}
 
-# ============ COUNTERS ============
-class Counters:
-    def __init__(self):
-        self.hit = 0
-        self.custom = 0
-        self.free = 0
-        self.bad = 0
-        self.lock = Lock()
-    
-    def get_stats(self):
-        with self.lock:
-            return f"HIT: {self.hit} | CUSTOM: {self.custom} | FREE: {self.free} | BAD: {self.bad}"
-    
-    def add_hit(self):
-        with self.lock:
-            self.hit += 1
-    
-    def add_custom(self):
-        with self.lock:
-            self.custom += 1
-    
-    def add_free(self):
-        with self.lock:
-            self.free += 1
-    
-    def add_bad(self):
-        with self.lock:
-            self.bad += 1
-    
-    def reset(self):
-        with self.lock:
-            self.hit = 0
-            self.custom = 0
-            self.free = 0
-            self.bad = 0
 
-counters = Counters()
+# ==================== COUNTRY_CODES ====================
+COUNTRY_CODES = {
+    "AF": "Afghanistan", "AX": "Aland Islands", "AL": "Albania", "DZ": "Algeria",
+    "AS": "American Samoa", "AD": "Andorra", "AO": "Angola", "AI": "Anguilla",
+    "AQ": "Antarctica", "AG": "Antigua and Barbuda", "AR": "Argentina", "AM": "Armenia",
+    "AW": "Aruba", "AU": "Australia", "AT": "Austria", "AZ": "Azerbaijan",
+    "BS": "Bahamas", "BH": "Bahrain", "BD": "Bangladesh", "BB": "Barbados",
+    "BY": "Belarus", "BE": "Belgium", "BZ": "Belize", "BJ": "Benin",
+    "BM": "Bermuda", "BT": "Bhutan", "BO": "Bolivia", "BQ": "Bonaire, Sint Eustatius and Saba",
+    "BA": "Bosnia and Herzegovina", "BW": "Botswana", "BV": "Bouvet Island", "BR": "Brazil",
+    "IO": "British Indian Ocean Territory", "BN": "Brunei Darussalam", "BG": "Bulgaria",
+    "BF": "Burkina Faso", "BI": "Burundi", "CV": "Cabo Verde", "KH": "Cambodia",
+    "CM": "Cameroon", "CA": "Canada", "KY": "Cayman Islands", "CF": "Central African Republic",
+    "TD": "Chad", "CL": "Chile", "CN": "China", "CX": "Christmas Island",
+    "CC": "Cocos (Keeling) Islands", "CO": "Colombia", "KM": "Comoros", "CG": "Congo",
+    "CD": "Congo, Democratic Republic of the", "CK": "Cook Islands", "CR": "Costa Rica",
+    "CI": "Cote d'Ivoire", "HR": "Croatia", "CU": "Cuba", "CW": "Curacao",
+    "CY": "Cyprus", "CZ": "Czech Republic", "DK": "Denmark", "DJ": "Djibouti",
+    "DM": "Dominica", "DO": "Dominican Republic", "EC": "Ecuador", "EG": "Egypt",
+    "SV": "El Salvador", "GQ": "Equatorial Guinea", "ER": "Eritrea", "EE": "Estonia",
+    "SZ": "Eswatini", "ET": "Ethiopia", "FK": "Falkland Islands", "FO": "Faroe Islands",
+    "FJ": "Fiji", "FI": "Finland", "FR": "France", "GF": "French Guiana",
+    "PF": "French Polynesia", "TF": "French Southern Territories", "GA": "Gabon",
+    "GM": "Gambia", "GE": "Georgia", "DE": "Germany", "GH": "Ghana",
+    "GI": "Gibraltar", "GR": "Greece", "GL": "Greenland", "GD": "Grenada",
+    "GP": "Guadeloupe", "GU": "Guam", "GT": "Guatemala", "GG": "Guernsey",
+    "GN": "Guinea", "GW": "Guinea-Bissau", "GY": "Guyana", "HT": "Haiti",
+    "HM": "Heard Island and McDonald Islands", "VA": "Holy See (Vatican City State)",
+    "HN": "Honduras", "HK": "Hong Kong", "HU": "Hungary", "IS": "Iceland",
+    "IN": "India", "ID": "Indonesia", "IR": "Iran", "IQ": "Iraq",
+    "IE": "Ireland", "IM": "Isle of Man", "IL": "Israel", "IT": "Italy",
+    "JM": "Jamaica", "JP": "Japan", "JE": "Jersey", "JO": "Jordan",
+    "KZ": "Kazakhstan", "KE": "Kenya", "KI": "Kiribati", "KR": "South Korea",
+    "KW": "Kuwait", "KG": "Kyrgyzstan", "LA": "Laos", "LV": "Latvia",
+    "LB": "Lebanon", "LS": "Lesotho", "LR": "Liberia", "LY": "Libya",
+    "LI": "Liechtenstein", "LT": "Lithuania", "LU": "Luxembourg", "MO": "Macau",
+    "MG": "Madagascar", "MW": "Malawi", "MY": "Malaysia", "MV": "Maldives",
+    "ML": "Mali", "MT": "Malta", "MH": "Marshall Islands", "MQ": "Martinique",
+    "MR": "Mauritania", "MU": "Mauritius", "YT": "Mayotte", "MX": "Mexico",
+    "FM": "Micronesia", "MD": "Moldova", "MC": "Monaco", "MN": "Mongolia",
+    "ME": "Montenegro", "MS": "Montserrat", "MA": "Morocco", "MZ": "Mozambique",
+    "MM": "Myanmar", "NA": "Namibia", "NR": "Nauru", "NP": "Nepal",
+    "NL": "Netherlands", "NC": "New Caledonia", "NZ": "New Zealand", "NI": "Nicaragua",
+    "NE": "Niger", "NG": "Nigeria", "NU": "Niue", "NF": "Norfolk Island",
+    "MK": "North Macedonia", "MP": "Northern Mariana Islands", "NO": "Norway",
+    "OM": "Oman", "PK": "Pakistan", "PW": "Palau", "PS": "Palestine",
+    "PA": "Panama", "PG": "Papua New Guinea", "PY": "Paraguay", "PE": "Peru",
+    "PH": "Philippines", "PN": "Pitcairn", "PL": "Poland", "PT": "Portugal",
+    "PR": "Puerto Rico", "QA": "Qatar", "RE": "Reunion", "RO": "Romania",
+    "RU": "Russian Federation", "RW": "Rwanda", "BL": "Saint Barthelemy",
+    "SH": "Saint Helena, Ascension and Tristan da Cunha", "KN": "Saint Kitts and Nevis",
+    "LC": "Saint Lucia", "MF": "Saint Martin (French part)", "PM": "Saint Pierre and Miquelon",
+    "VC": "Saint Vincent and the Grenadines", "WS": "Samoa", "SM": "San Marino",
+    "ST": "Sao Tome and Principe", "SA": "Saudi Arabia", "SN": "Senegal",
+    "RS": "Serbia", "SC": "Seychelles", "SL": "Sierra Leone", "SG": "Singapore",
+    "SX": "Sint Maarten", "SK": "Slovakia", "SI": "Slovenia", "SB": "Solomon Islands",
+    "SO": "Somalia", "ZA": "South Africa", "GS": "South Georgia and the South Sandwich Islands",
+    "SS": "South Sudan", "ES": "Spain", "LK": "Sri Lanka", "SD": "Sudan",
+    "SR": "Suriname", "SJ": "Svalbard and Jan Mayen", "SE": "Sweden", "CH": "Switzerland",
+    "SY": "Syrian Arab Republic", "TW": "Taiwan", "TJ": "Tajikistan", "TZ": "Tanzania",
+    "TH": "Thailand", "TL": "Timor-Leste", "TG": "Togo", "TK": "Tokelau",
+    "TO": "Tonga", "TT": "Trinidad and Tobago", "TN": "Tunisia", "TR": "Turkey",
+    "TM": "Turkmenistan", "TC": "Turks and Caicos Islands", "TV": "Tuvalu",
+    "UG": "Uganda", "UA": "Ukraine", "AE": "United Arab Emirates", "GB": "United Kingdom",
+    "US": "United States", "UM": "United States Minor Outlying Islands", "UY": "Uruguay",
+    "UZ": "Uzbekistan", "VU": "Vanuatu", "VE": "Venezuela", "VN": "Vietnam",
+    "VG": "Virgin Islands (British)", "VI": "Virgin Islands (U.S.)", "WF": "Wallis and Futuna",
+    "EH": "Western Sahara", "YE": "Yemen", "ZM": "Zambia", "ZW": "Zimbabwe"
+}
 
-# ============ COOKIE FUNCTIONS ============
-def parse_netscape_cookie_line(line):
-    parts = line.strip().split("\t")
+requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+
+
+def get_full_country_name(code):
+    countries = {
+        "AF": "Afghanistan", "AX": "Aland Islands", "AL": "Albania", "DZ": "Algeria",
+        "AS": "American Samoa", "AD": "Andorra", "AO": "Angola", "AI": "Anguilla",
+        "AQ": "Antarctica", "AG": "Antigua and Barbuda", "AR": "Argentina", "AM": "Armenia",
+        "AW": "Aruba", "AU": "Australia", "AT": "Austria", "AZ": "Azerbaijan",
+        "BS": "Bahamas", "BH": "Bahrain", "BD": "Bangladesh", "BB": "Barbados",
+        "BY": "Belarus", "BE": "Belgium", "BZ": "Belize", "BJ": "Benin",
+        "BM": "Bermuda", "BT": "Bhutan", "BO": "Bolivia", "BQ": "Bonaire, Sint Eustatius and Saba",
+        "BA": "Bosnia and Herzegovina", "BW": "Botswana", "BV": "Bouvet Island", "BR": "Brazil",
+        "IO": "British Indian Ocean Territory", "BN": "Brunei Darussalam", "BG": "Bulgaria",
+        "BF": "Burkina Faso", "BI": "Burundi", "CV": "Cabo Verde", "KH": "Cambodia",
+        "CM": "Cameroon", "CA": "Canada", "KY": "Cayman Islands", "CF": "Central African Republic",
+        "TD": "Chad", "CL": "Chile", "CN": "China", "CX": "Christmas Island",
+        "CC": "Cocos (Keeling) Islands", "CO": "Colombia", "KM": "Comoros", "CG": "Congo",
+        "CD": "Congo, Democratic Republic of the", "CK": "Cook Islands", "CR": "Costa Rica",
+        "CI": "Cote d'Ivoire", "HR": "Croatia", "CU": "Cuba", "CW": "Curacao",
+        "CY": "Cyprus", "CZ": "Czech Republic", "DK": "Denmark", "DJ": "Djibouti",
+        "DM": "Dominica", "DO": "Dominican Republic", "EC": "Ecuador", "EG": "Egypt",
+        "SV": "El Salvador", "GQ": "Equatorial Guinea", "ER": "Eritrea", "EE": "Estonia",
+        "SZ": "Eswatini", "ET": "Ethiopia", "FK": "Falkland Islands", "FO": "Faroe Islands",
+        "FJ": "Fiji", "FI": "Finland", "FR": "France", "GF": "French Guiana",
+        "PF": "French Polynesia", "TF": "French Southern Territories", "GA": "Gabon",
+        "GM": "Gambia", "GE": "Georgia", "DE": "Germany", "GH": "Ghana",
+        "GI": "Gibraltar", "GR": "Greece", "GL": "Greenland", "GD": "Grenada",
+        "GP": "Guadeloupe", "GU": "Guam", "GT": "Guatemala", "GG": "Guernsey",
+        "GN": "Guinea", "GW": "Guinea-Bissau", "GY": "Guyana", "HT": "Haiti",
+        "HM": "Heard Island and McDonald Islands", "VA": "Holy See (Vatican City State)",
+        "HN": "Honduras", "HK": "Hong Kong", "HU": "Hungary", "IS": "Iceland",
+        "IN": "India", "ID": "Indonesia", "IR": "Iran", "IQ": "Iraq",
+        "IE": "Ireland", "IM": "Isle of Man", "IL": "Israel", "IT": "Italy",
+        "JM": "Jamaica", "JP": "Japan", "JE": "Jersey", "JO": "Jordan",
+        "KZ": "Kazakhstan", "KE": "Kenya", "KI": "Kiribati", "KR": "South Korea",
+        "KW": "Kuwait", "KG": "Kyrgyzstan", "LA": "Laos", "LV": "Latvia",
+        "LB": "Lebanon", "LS": "Lesotho", "LR": "Liberia", "LY": "Libya",
+        "LI": "Liechtenstein", "LT": "Lithuania", "LU": "Luxembourg", "MO": "Macau",
+        "MG": "Madagascar", "MW": "Malawi", "MY": "Malaysia", "MV": "Maldives",
+        "ML": "Mali", "MT": "Malta", "MH": "Marshall Islands", "MQ": "Martinique",
+        "MR": "Mauritania", "MU": "Mauritius", "YT": "Mayotte", "MX": "Mexico",
+        "FM": "Micronesia", "MD": "Moldova", "MC": "Monaco", "MN": "Mongolia",
+        "ME": "Montenegro", "MS": "Montserrat", "MA": "Morocco", "MZ": "Mozambique",
+        "MM": "Myanmar", "NA": "Namibia", "NR": "Nauru", "NP": "Nepal",
+        "NL": "Netherlands", "NC": "New Caledonia", "NZ": "New Zealand", "NI": "Nicaragua",
+        "NE": "Niger", "NG": "Nigeria", "NU": "Niue", "NF": "Norfolk Island",
+        "MK": "North Macedonia", "MP": "Northern Mariana Islands", "NO": "Norway",
+        "OM": "Oman", "PK": "Pakistan", "PW": "Palau", "PS": "Palestine",
+        "PA": "Panama", "PG": "Papua New Guinea", "PY": "Paraguay", "PE": "Peru",
+        "PH": "Philippines", "PN": "Pitcairn", "PL": "Poland", "PT": "Portugal",
+        "PR": "Puerto Rico", "QA": "Qatar", "RE": "Reunion", "RO": "Romania",
+        "RU": "Russian Federation", "RW": "Rwanda", "BL": "Saint Barthelemy",
+        "SH": "Saint Helena, Ascension and Tristan da Cunha", "KN": "Saint Kitts and Nevis",
+        "LC": "Saint Lucia", "MF": "Saint Martin (French part)", "PM": "Saint Pierre and Miquelon",
+        "VC": "Saint Vincent and the Grenadines", "WS": "Samoa", "SM": "San Marino",
+        "ST": "Sao Tome and Principe", "SA": "Saudi Arabia", "SN": "Senegal",
+        "RS": "Serbia", "SC": "Seychelles", "SL": "Sierra Leone", "SG": "Singapore",
+        "SX": "Sint Maarten", "SK": "Slovakia", "SI": "Slovenia", "SB": "Solomon Islands",
+        "SO": "Somalia", "ZA": "South Africa", "GS": "South Georgia and the South Sandwich Islands",
+        "SS": "South Sudan", "ES": "Spain", "LK": "Sri Lanka", "SD": "Sudan",
+        "SR": "Suriname", "SJ": "Svalbard and Jan Mayen", "SE": "Sweden", "CH": "Switzerland",
+        "SY": "Syrian Arab Republic", "TW": "Taiwan", "TJ": "Tajikistan", "TZ": "Tanzania",
+        "TH": "Thailand", "TL": "Timor-Leste", "TG": "Togo", "TK": "Tokelau",
+        "TO": "Tonga", "TT": "Trinidad and Tobago", "TN": "Tunisia", "TR": "Turkey",
+        "TM": "Turkmenistan", "TC": "Turks and Caicos Islands", "TV": "Tuvalu",
+        "UG": "Uganda", "UA": "Ukraine", "AE": "United Arab Emirates", "GB": "United Kingdom",
+        "US": "United States", "UM": "United States Minor Outlying Islands", "UY": "Uruguay",
+        "UZ": "Uzbekistan", "VU": "Vanuatu", "VE": "Venezuela", "VN": "Vietnam",
+        "VG": "Virgin Islands (British)", "VI": "Virgin Islands (U.S.)", "WF": "Wallis and Futuna",
+        "EH": "Western Sahara", "YE": "Yemen", "ZM": "Zambia", "ZW": "Zimbabwe"
+    }
+    return countries.get(code, code)
+
+
+def decode_unicode_escape(text):
+    if not text:
+        return text
+    try:
+        return text.encode('utf-8').decode('unicode_escape')
+    except:
+        return text
+
+
+def parse_cookie_line(line):
+    line = line.strip()
+    if not line or line.startswith('#'):
+        return {}
+    
+    if '\t' in line:
+        parts = line.split('\t')
+        if len(parts) >= 7:
+            return {parts[5]: parts[6]}
+    
+    parts = re.split(r'\s{2,}', line)
     if len(parts) >= 7:
         return {parts[5]: parts[6]}
+    
+    parts = re.split(r'\s+', line)
+    if len(parts) >= 7:
+        return {parts[-2]: parts[-1]}
+    
     return {}
 
-def decode_cookie_value(value):
+
+def _decode_cookie_value(value):
     if isinstance(value, str) and "%" in value:
         try:
             return urllib.parse.unquote(value)
@@ -138,149 +319,405 @@ def decode_cookie_value(value):
             return value
     return value
 
-def fix_email_display(email):
-    if not email or email == "Unknown":
-        return email
-    return email.replace('\\x40', '@').replace('%40', '@')
 
 def extract_cookie_dict(text):
     cookie_dict = {}
+
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        cookie_dict.update(parse_netscape_cookie_line(line))
+        cookie_dict.update(parse_cookie_line(line))
+
+    if not cookie_dict.get(REQUIRED_COOKIE):
+        match = re.search(r'NetflixId\s+([^\s]+)', text)
+        if match:
+            cookie_dict['NetflixId'] = _decode_cookie_value(match.group(1))
+        
+        if not cookie_dict.get(REQUIRED_COOKIE):
+            match = re.search(r'NetflixId[=:]\s*([^;\s]+)', text)
+            if match:
+                cookie_dict['NetflixId'] = _decode_cookie_value(match.group(1))
+
     try:
         data = json.loads(text)
-        if isinstance(data, list):
-            for cookie in data:
+    except json.JSONDecodeError:
+        data = None
+
+    if isinstance(data, list):
+        for cookie in data:
+            name = cookie.get("name")
+            value = cookie.get("value")
+            if name in COOKIE_KEYS and isinstance(value, str):
+                cookie_dict[name] = _decode_cookie_value(value)
+    elif isinstance(data, dict):
+        if any(key in data for key in COOKIE_KEYS):
+            for key in COOKIE_KEYS:
+                value = data.get(key)
+                if isinstance(value, str):
+                    cookie_dict[key] = _decode_cookie_value(value)
+        elif isinstance(data.get("cookies"), list):
+            for cookie in data["cookies"]:
                 name = cookie.get("name")
                 value = cookie.get("value")
                 if name in COOKIE_KEYS and isinstance(value, str):
-                    cookie_dict[name] = decode_cookie_value(value)
-        elif isinstance(data, dict):
-            if any(key in data for key in COOKIE_KEYS):
-                for key in COOKIE_KEYS:
-                    value = data.get(key)
-                    if isinstance(value, str):
-                        cookie_dict[key] = decode_cookie_value(value)
-            elif isinstance(data.get("cookies"), list):
-                for cookie in data["cookies"]:
-                    name = cookie.get("name")
-                    value = cookie.get("value")
-                    if name in COOKIE_KEYS and isinstance(value, str):
-                        cookie_dict[name] = decode_cookie_value(value)
-    except:
-        pass
-    for key in COOKIE_KEYS:
-        if key in cookie_dict:
-            continue
-        match = re.search(rf"(?<!\w){re.escape(key)}=([^;,\s]+)", text)
-        if match:
-            cookie_dict[key] = decode_cookie_value(match.group(1))
+                    cookie_dict[name] = _decode_cookie_value(value)
+
     return cookie_dict
 
-def extract_cookies_from_file(file_path):
-    try:
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-        return extract_cookie_dict(content)
-    except Exception:
-        return {}
 
-def get_account_info(cookie_dict):
-    netflix_id = cookie_dict.get(REQUIRED_COOKIE)
-    if not netflix_id:
-        return None
-    url = "https://www.netflix.com/account"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Connection": "close",
+def build_cookie_string(cookie_dict):
+    cookies = []
+    for key, value in cookie_dict.items():
+        if key in COOKIE_KEYS and value:
+            cookies.append(f"{key}={value}")
+    return "; ".join(cookies)
+
+
+def build_nftoken_link_pc(token):
+    return f"https://netflix.com/browse?nftoken={token}"
+
+
+def build_nftoken_link_phone(token):
+    return f"https://netflix.com/unsupported?nftoken={token}"
+
+
+# ==================== Extraction Functions ====================
+def extract_netflix_country(response):
+    country = "unknown"
+    try:
+        match = re.search(r'"currentCountry":"([^"]+)"', response)
+        if match:
+            country = decode_unicode_escape(match.group(1))
+    except:
+        pass
+    return country
+
+
+def extract_netflix_email(response):
+    email = "unknown"
+    patterns = [
+        r'"profileEmailAddress":"([^"]+)"',
+        r'"emailAddress":"([^"]+)"'
+    ]
+    for pattern in patterns:
+        try:
+            match = re.search(pattern, response)
+            if match:
+                email = decode_unicode_escape(match.group(1))
+                if '@' in email and '.' in email:
+                    break
+        except:
+            pass
+    return email
+
+
+def extract_netflix_maxStreams(response):
+    maxStreams = "unknown"
+    try:
+        match = re.search(r'"maxStreams":\{"fieldType":"Numeric","value":(\d+)', response)
+        if match:
+            maxStreams = match.group(1)
+        else:
+            match = re.search(r'"maxStreams":(\d+)', response)
+            if match:
+                maxStreams = match.group(1)
+    except:
+        pass
+    return maxStreams
+
+
+def extract_netflix_localizedPlanName(response):
+    localizedPlanName = "unknown"
+    try:
+        match = re.search(r'"localizedPlanName":\{"fieldType":"String","value":"([^"]+)"', response)
+        if match:
+            localizedPlanName = decode_unicode_escape(match.group(1))
+        else:
+            match = re.search(r'"localizedPlanName":"([^"]+)"', response)
+            if match:
+                localizedPlanName = decode_unicode_escape(match.group(1))
+    except:
+        pass
+    return localizedPlanName
+
+
+def extract_netflix_videoQuality(response):
+    videoQuality = "unknown"
+    try:
+        match = re.search(r'"videoQuality":\{"fieldType":"String","value":"([^"]+)"', response)
+        if match:
+            videoQuality = decode_unicode_escape(match.group(1))
+        else:
+            match = re.search(r'"videoQuality":"([^"]+)"', response)
+            if match:
+                videoQuality = decode_unicode_escape(match.group(1))
+    except:
+        pass
+    return videoQuality
+
+
+def extract_netflix_memberSince(response):
+    memberSince = "unknown"
+    try:
+        match = re.search(r'"memberSince":"([^"]+)"', response)
+        if match:
+            memberSince = match.group(1)
+        else:
+            match = re.search(r'"memberSince":\{"fieldType":"Numeric","value":(\d+)}', response)
+            if match:
+                timestamp = int(match.group(1)) / 1000
+                memberSince = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
+    except:
+        pass
+    return memberSince
+
+
+def extract_netflix_nextBillingDate(response):
+    nextBillingDate = "unknown"
+    try:
+        match = re.search(r'"nextBillingDate":\{"fieldType":"String","value":"([^"]+)"', response)
+        if match:
+            nextBillingDate = decode_unicode_escape(match.group(1))
+        else:
+            match = re.search(r'"nextBillingDate":"([^"]+)"', response)
+            if match:
+                nextBillingDate = decode_unicode_escape(match.group(1))
+    except:
+        pass
+    return nextBillingDate
+
+
+def extract_netflix_canChangePlan(response):
+    canChangePlan = "unknown"
+    try:
+        match = re.search(r'"canChangePlan":\{"fieldType":"Boolean","value":(true|false)', response)
+        if match:
+            canChangePlan = match.group(1)
+        else:
+            match = re.search(r'"canChangePlan":(true|false)', response)
+            if match:
+                canChangePlan = match.group(1)
+    except:
+        pass
+    return canChangePlan
+
+
+def extract_netflix_isPaused(response):
+    isPaused = "unknown"
+    try:
+        match = re.search(r'"isPaused":\{"fieldType":"Boolean","value":(true|false)', response)
+        if match:
+            isPaused = match.group(1)
+        else:
+            match = re.search(r'"isPaused":(true|false)', response)
+            if match:
+                isPaused = match.group(1)
+    except:
+        pass
+    return isPaused
+
+
+def extract_netflix_isPendingPause(response):
+    isPendingPause = "unknown"
+    try:
+        match = re.search(r'"isPendingPause":\{"fieldType":"Boolean","value":(true|false)', response)
+        if match:
+            isPendingPause = match.group(1)
+        else:
+            match = re.search(r'"isPendingPause":(true|false)', response)
+            if match:
+                isPendingPause = match.group(1)
+    except:
+        pass
+    return isPendingPause
+
+
+def extract_netflix_membershipStatus(response):
+    membershipStatus = "unknown"
+    try:
+        match = re.search(r'"membershipStatus":"([^"]+)"', response)
+        if match:
+            membershipStatus = match.group(1)
+    except:
+        pass
+    return membershipStatus
+
+
+def extract_netflix_planPrice(response):
+    planPrice = "unknown"
+    try:
+        match = re.search(r'"planPrice":\{"fieldType":"String","value":"([^"]+)"', response)
+        if match:
+            planPrice = decode_unicode_escape(match.group(1))
+        else:
+            match = re.search(r'"planPrice":"([^"]+)"', response)
+            if match:
+                planPrice = decode_unicode_escape(match.group(1))
+    except:
+        pass
+    return planPrice
+
+
+def extract_netflix_planId(response):
+    planId = "unknown"
+    try:
+        match = re.search(r'"planId":\{"fieldType":"String","value":"([^"]+)"', response)
+        if match:
+            planId = match.group(1)
+        else:
+            match = re.search(r'"planId":"([^"]+)"', response)
+            if match:
+                planId = match.group(1)
+    except:
+        pass
+    return planId
+
+
+def extract_netflix_name(response):
+    name = "unknown"
+    try:
+        match = re.search(r'"name":"([^"]+)"', response)
+        if match:
+            name = decode_unicode_escape(match.group(1))
+    except:
+        pass
+    return name
+
+
+def extract_netflix_guid(response):
+    guid = "unknown"
+    try:
+        match = re.search(r'"guid":"([^"]+)"', response)
+        if match:
+            guid = match.group(1)
+    except:
+        pass
+    return guid
+
+
+def identify_plan_type(plan_name):
+    if not plan_name or plan_name == "unknown":
+        return "Unknown"
+    plan_name_lower = plan_name.lower()
+    if "premium" in plan_name_lower:
+        return "Premium"
+    elif "standard" in plan_name_lower or "ستاندرد" in plan_name_lower:
+        return "Standard"
+    elif "basic" in plan_name_lower or "بيسك" in plan_name_lower:
+        return "Basic"
+    elif "mobile" in plan_name_lower or "موبايل" in plan_name_lower:
+        return "Mobile"
+    else:
+        return plan_name
+
+
+def extract_all_netflix_data(response):
+    data = {
+        "country": extract_netflix_country(response),
+        "email": extract_netflix_email(response),
+        "maxStreams": extract_netflix_maxStreams(response),
+        "localizedPlanName": extract_netflix_localizedPlanName(response),
+        "videoQuality": extract_netflix_videoQuality(response),
+        "memberSince": extract_netflix_memberSince(response),
+        "nextBillingDate": extract_netflix_nextBillingDate(response),
+        "canChangePlan": extract_netflix_canChangePlan(response),
+        "isPaused": extract_netflix_isPaused(response),
+        "isPendingPause": extract_netflix_isPendingPause(response),
+        "membershipStatus": extract_netflix_membershipStatus(response),
+        "planPrice": extract_netflix_planPrice(response),
+        "planId": extract_netflix_planId(response),
+        "name": extract_netflix_name(response),
+        "guid": extract_netflix_guid(response),
+        "planType": identify_plan_type(extract_netflix_localizedPlanName(response))
     }
-    cookies = {"NetflixId": netflix_id}
+    return data
+
+
+def fetch_account_info(cookie_dict):
+    """Fetch account info from netflix.com/account"""
+    url = "https://www.netflix.com/account"
+    
+    # Build cookie string
+    cookies = {}
+    for key in COOKIE_KEYS:
+        if key in cookie_dict and cookie_dict[key]:
+            cookies[key] = cookie_dict[key]
+    
     try:
-        response = requests.get(url, headers=headers, cookies=cookies, timeout=10, verify=False)
-        text = response.text
-        response.close()
+        response = requests.get(
+            url,
+            headers=ACCOUNT_HEADERS,
+            cookies=cookies,
+            timeout=30,
+            verify=False,
+            allow_redirects=True
+        )
+        response.raise_for_status()
+        response_text = response.text
         
-        info = {
-            "status": "Unknown",
-            "email": "Unknown",
-            "country": "Unknown",
-            "plan": "Unknown",
-            "maxStreams": "Unknown",
-            "memberSince": "Unknown",
-            "nextBilling": "Unknown",
-        }
+        # Extract data using the functions
+        data = extract_all_netflix_data(response_text)
+        return data
         
-        status_match = re.search(r'"membershipStatus":"(\w+)"', text)
-        if status_match:
-            status = status_match.group(1)
-            if status == "CURRENT_MEMBER":
-                info["status"] = "Active"
-            elif status == "FORMER_MEMBER":
-                info["status"] = "Canceled"
-            elif status == "NEVER_MEMBER":
-                info["status"] = "Free"
-            else:
-                info["status"] = status
-        
-        email_match = re.search(r'"profileEmailAddress":"([^"]+)"', text)
-        if not email_match:
-            email_match = re.search(r'"emailAddress":"([^"]+)"', text)
-        if email_match:
-            info["email"] = fix_email_display(email_match.group(1))
-        
-        country_match = re.search(r'"currentCountry":"([^"]+)"', text)
-        if country_match:
-            info["country"] = country_match.group(1)
-        
-        plan_match = re.search(r'"localizedPlanName":\{"fieldType":"String","value":"([^"]+)"', text)
-        if not plan_match:
-            plan_match = re.search(r'"localizedPlanName":"([^"]+)"', text)
-        if plan_match:
-            info["plan"] = plan_match.group(1)
-        
-        streams_match = re.search(r'"maxStreams":\{"fieldType":"Numeric","value":(\d+)', text)
-        if streams_match:
-            info["maxStreams"] = streams_match.group(1)
-        
-        since_match = re.search(r'"memberSince":"([^"]+)"', text)
-        if since_match:
-            info["memberSince"] = since_match.group(1)
-        
-        billing_match = re.search(r'"nextBillingDate":\{"fieldType":"String","value":"([^"]+)"', text)
-        if billing_match:
-            info["nextBilling"] = billing_match.group(1)
-        
-        return info
-    except Exception:
+    except Exception as e:
+        print(f"Error fetching account info: {e}")
         return None
 
-def get_nftoken_from_cookies(cookie_dict):
+
+def fetch_nftoken(cookie_dict):
     netflix_id = cookie_dict.get(REQUIRED_COOKIE)
     if not netflix_id:
-        return None, None
+        raise ValueError("Missing required cookie: NetflixId")
+
     headers = dict(BASE_HEADERS)
-    headers["Cookie"] = f"NetflixId={netflix_id}"
-    headers["Connection"] = "close"
-    try:
-        response = requests.get(API_URL, params=QUERY_PARAMS, headers=headers, timeout=10, verify=False)
-        response.raise_for_status()
-        data = response.json()
-        response.close()
-        token_data = (((data.get("value") or {}).get("account") or {}).get("token") or {}).get("default") or {}
-        token = token_data.get("token")
-        expires = token_data.get("expires")
+    cookie_string = build_cookie_string(cookie_dict)
+    headers["Cookie"] = cookie_string
+
+    response = requests.get(
+        API_URL,
+        params=QUERY_PARAMS,
+        headers=headers,
+        timeout=30,
+        verify=False,
+    )
+    response.raise_for_status()
+
+    data = response.json()
+    
+    token = None
+    expires = None
+    
+    if isinstance(data, dict):
+        value = data.get("value")
+        if isinstance(value, dict):
+            account = value.get("account")
+            if isinstance(account, dict):
+                token_obj = account.get("token")
+                if isinstance(token_obj, dict):
+                    default = token_obj.get("default")
+                    if isinstance(default, dict):
+                        token = default.get("token")
+                        expires = default.get("expires")
+        
         if not token:
-            return None, None
-        if isinstance(expires, int) and len(str(expires)) == 13:
-            expires //= 1000
-        return token, expires
-    except Exception:
-        return None, None
+            token = data.get("token")
+            expires = data.get("expires")
+        
+        if not token:
+            account = data.get("account")
+            if isinstance(account, dict):
+                token = account.get("token")
+                expires = account.get("expires")
+
+    if not token:
+        raise ValueError("No token found in response. Cookie may be expired.")
+
+    if isinstance(expires, int) and len(str(expires)) == 13:
+        expires //= 1000
+
+    return token, expires
+
 
 def format_expiry(expires):
     if not isinstance(expires, (int, float)):
@@ -290,320 +727,141 @@ def format_expiry(expires):
     except Exception:
         return str(expires)
 
-def classify_plan(plan_name):
-    if not plan_name:
-        return "Unknown"
-    plan_lower = plan_name.lower()
-    basic_keywords = ["basic", "dasar", "asas", "basis", "básico", "essentiel", "base"]
-    standard_keywords = ["standard", "standar", "standart", "estándar", "padrão"]
-    premium_keywords = ["premium", "prémium", "perhe"]
-    mobile_keywords = ["mobile", "telefon", "celular"]
-    
-    for kw in mobile_keywords:
-        if kw in plan_lower:
-            return "Mobile"
-    for kw in basic_keywords:
-        if kw in plan_lower:
-            return "Basic"
-    for kw in standard_keywords:
-        if kw in plan_lower:
-            return "Standard"
-    for kw in premium_keywords:
-        if kw in plan_lower:
-            return "Premium"
-    
-    return plan_name
 
-def is_valid_cookie(cookie_dict):
-    return REQUIRED_COOKIE in cookie_dict
-
-def process_single_cookie_file(file_path):
-    try:
-        cookie_dict = extract_cookies_from_file(file_path)
-        if not is_valid_cookie(cookie_dict):
-            return None, None
-        
-        account_info = get_account_info(cookie_dict)
-        if not account_info:
-            return None, None
-        
-        account_info["email"] = fix_email_display(account_info["email"])
-        
-        if account_info["status"] == "Active":
-            token, expires = get_nftoken_from_cookies(cookie_dict)
-            if not token:
-                return None, None
-            
-            time_left_str = "Unknown"
-            if expires:
-                try:
-                    expiry_dt = datetime.fromtimestamp(expires)
-                    time_now = datetime.now()
-                    time_left = expiry_dt - time_now
-                    if time_left.total_seconds() > 0:
-                        days = time_left.days
-                        hours = time_left.seconds // 3600
-                        minutes = (time_left.seconds % 3600) // 60
-                        time_left_str = f"{days}d {hours}h {minutes}m"
-                    else:
-                        time_left_str = "EXPIRED"
-                except:
-                    pass
-            
-            plan_type = classify_plan(account_info["plan"])
-            
-            result = {
-                "email": account_info["email"],
-                "status": account_info["status"],
-                "plan": account_info["plan"],
-                "plan_type": plan_type,
-                "country": account_info["country"],
-                "memberSince": account_info["memberSince"],
-                "nextBilling": account_info["nextBilling"],
-                "maxStreams": account_info["maxStreams"],
-                "nftoken": token,
-                "expires": expires,
-                "expiry_formatted": format_expiry(expires),
-                "pc_link": f"https://www.netflix.com/browse?nftoken={token}",
-                "phone_link": f"https://www.netflix.com/unsupported?nftoken={token}",
-                "time_left": time_left_str
-            }
-            
-            if plan_type in ["Premium", "Standard", "Basic", "Mobile"]:
-                return result, "HIT"
-            else:
-                return None, None
-        
-        elif account_info["status"] == "Canceled":
-            return {"email": account_info["email"], "status": "Canceled", "plan": account_info["plan"], "country": account_info["country"]}, "CUSTOM"
-        
-        elif account_info["status"] == "Free":
-            return {"email": account_info["email"], "status": "Free", "country": account_info["country"]}, "FREE"
-        
-        else:
-            return None, None
-            
-    except Exception as e:
-        return None, None
-
-# ============ TELEGRAM HANDLERS ============
+# ==================== Telegram Bot Handlers ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = (
-        "🎬 **WELCOME TO NETFLIX CHECKER + AUTO CONVERTER NFTOKENS LINKS**\n\n"
-        "📤 **PLEASE SEND .TXT FILE TO CHECK**\n\n"
-        "📂 **Supported formats:**\n"
-        "• Netscape cookie format\n"
-        "• JSON format\n"
-        "• Direct key=value format\n\n"
-        "⚡ **What I do:**\n"
-        "✅ Check if cookie is valid\n"
-        "✅ Detect plan type: Premium, Standard, Basic, Mobile\n"
-        "✅ Auto convert to NFTokens (PC + Phone links)\n"
-        "❌ Free, Custom (Canceled), and Bad cookies are not converted\n\n"
-        "💎 **Only Premium, Standard, Basic, Mobile plans get NFTokens!**"
+    await update.message.reply_text(
+        "🎬 *Netflix Token Generator Bot*\n\n"
+        "Send me your Netflix cookies in Netscape format and I'll generate login links with account details.\n\n"
+        "Example:\n"
+        "`.netflix.com\\tTRUE\\t/\\tTRUE\\t...\\tNetflixId\\t...`",
+        parse_mode="Markdown"
     )
-    
-    await update.message.reply_text(welcome_message, parse_mode="Markdown")
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def handle_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cookie_text = update.message.text.strip()
+
+    await update.message.reply_text("⏳ Processing your cookies...")
+
     try:
-        document = update.message.document
+        cookie_dict = extract_cookie_dict(cookie_text)
         
-        file_name = document.file_name or ""
-        if not file_name.lower().endswith('.txt'):
+        if not cookie_dict:
             await update.message.reply_text(
-                "❌ **Please send a .TXT file only!**",
-                parse_mode="Markdown"
+                "❌ No valid cookies found!\n"
+                "Make sure they contain NetflixId."
             )
             return
-        
-        if document.file_size > 1 * 1024 * 1024:
+
+        if REQUIRED_COOKIE not in cookie_dict:
             await update.message.reply_text(
-                f"❌ **File too large!**\n\nMax: 1 MB\nYour file: {document.file_size / (1024*1024):.2f} MB",
-                parse_mode="Markdown"
+                f"❌ NetflixId not found!\n"
+                f"Found: {', '.join(cookie_dict.keys()) if cookie_dict else 'nothing'}"
             )
             return
+
+        # Get token from API
+        token, expires = fetch_nftoken(cookie_dict)
         
-        status_msg = await update.message.reply_text(
-            "⏳ **Processing your file...**\n\n"
-            "📊 HIT: 0 | CUSTOM: 0 | FREE: 0 | BAD: 0",
-            parse_mode="Markdown"
-        )
+        # Get account info from netflix.com/account
+        account_info = fetch_account_info(cookie_dict)
         
-        temp_dir = tempfile.mkdtemp()
-        file_path = os.path.join(temp_dir, file_name)
-        file = await context.bot.get_file(document.file_id)
-        await file.download_to_drive(file_path)
+        pc_link = build_nftoken_link_pc(token)
+        phone_link = build_nftoken_link_phone(token)
+        expiry_str = format_expiry(expires)
         
-        result, status = process_single_cookie_file(file_path)
-        
-        try:
-            shutil.rmtree(temp_dir)
-        except:
-            pass
-        
-        if status == "HIT":
-            counters.add_hit()
-            await status_msg.delete()
+        # Use account info or fallback to Unknown
+        if account_info:
+            country_code = account_info.get('country', 'unknown')
+            flag = FLAG_MAP.get(country_code, '🌍')
+            country_full = get_full_country_name(country_code)
             
-            status_emoji = "✅"
-            plan_emoji = "🟣" if result["plan_type"] == "Premium" else "🔵" if result["plan_type"] == "Standard" else "🟢" if result["plan_type"] == "Basic" else "📱"
+            status_map = {
+                "CURRENT_MEMBER": "✅ Active",
+                "FORMER_MEMBER": "⏸️ Cancelled",
+                "NEVER_MEMBER": "🆓 Free"
+            }
+            status = status_map.get(account_info.get('membershipStatus', ''), account_info.get('membershipStatus', 'Unknown'))
+            
+            email = account_info.get('email', 'Unknown')
+            if email == 'unknown' or not email or '@' not in email:
+                email = 'Not Available'
             
             message = (
-                f"🎬 **Netflix Hit**\n"
-                f"💎 **SUBSCRIPTION**\n"
-                f"┣ 📧 Email ▸ `{result['email']}` — ✅ Verified\n"
-                f"┣ 💎 Plan ▸ {result['plan_type']}\n"
-                f"┣ 🌍 Country ▸ {result['country']}\n"
-                f"┣ ⏳ Member ▸ {result['memberSince']}\n"
-                f"┗ 📅 Next bill ▸ {result['nextBilling']}\n\n"
-                f"⏱️ Expires: {result['expiry_formatted']}\n"
-                f"⏳ Time Left: {result['time_left']}\n"
-                f"📺 Max Streams: {result['maxStreams']}\n\n"
-                f"🔑 **NFToken Links:**"
+                f"✅ *Token Generated Successfully!*\n\n"
+                f"📧 *Email:* `{email}`\n"
+                f"🌍 *Country:* {flag} {country_full} ({country_code})\n"
+                f"📺 *Plan:* {account_info.get('localizedPlanName', 'Unknown')}\n"
+                f"📊 *Plan Type:* {account_info.get('planType', 'Unknown')}\n"
+                f"🖥️ *Video Quality:* {account_info.get('videoQuality', 'Unknown')}\n"
+                f"📱 *Max Streams:* {account_info.get('maxStreams', 'Unknown')}\n"
+                f"💰 *Price:* {account_info.get('planPrice', 'Unknown')}\n"
+                f"📅 *Member Since:* {account_info.get('memberSince', 'Unknown')}\n"
+                f"📆 *Next Billing:* {account_info.get('nextBillingDate', 'Unknown')}\n"
+                f"📌 *Status:* {status}\n"
+                f"⏰ *Token Expires:* {expiry_str}\n\n"
+                f"🔗 *Login Links:*"
             )
-            
-            keyboard = [
-                [InlineKeyboardButton("💻 PC Link", url=result['pc_link'])],
-                [InlineKeyboardButton("📱 Phone Link", url=result['phone_link'])],
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                message,
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
-            
-            await update.message.reply_text(
-                f"📊 **Current Stats:** {counters.get_stats()}",
-                parse_mode="Markdown"
-            )
-            
-        elif status == "CUSTOM":
-            counters.add_custom()
-            await status_msg.delete()
-            
-            message = (
-                f"❌ **Custom Account (Canceled)**\n\n"
-                f"📧 Email: {result['email']}\n"
-                f"📦 Plan: {result['plan']}\n"
-                f"🌍 Country: {result['country']}\n\n"
-                f"⚠️ This account is **CANCELED**. No NFTokens generated."
-            )
-            await update.message.reply_text(message, parse_mode="Markdown")
-            
-            await update.message.reply_text(
-                f"📊 **Current Stats:** {counters.get_stats()}",
-                parse_mode="Markdown"
-            )
-            
-        elif status == "FREE":
-            counters.add_free()
-            await status_msg.delete()
-            
-            message = (
-                f"🆓 **Free Account**\n\n"
-                f"📧 Email: {result['email']}\n"
-                f"🌍 Country: {result['country']}\n\n"
-                f"⚠️ This is a **FREE** account. No NFTokens generated."
-            )
-            await update.message.reply_text(message, parse_mode="Markdown")
-            
-            await update.message.reply_text(
-                f"📊 **Current Stats:** {counters.get_stats()}",
-                parse_mode="Markdown"
-            )
-            
         else:
-            counters.add_bad()
-            await status_msg.delete()
-            
+            # Fallback if account info fetch fails
             message = (
-                f"❌ **Bad Cookie / Invalid**\n\n"
-                f"⚠️ The cookie you provided is **INVALID** or **EXPIRED**.\n\n"
-                f"📊 **Current Stats:** {counters.get_stats()}"
+                f"✅ *Token Generated Successfully!*\n\n"
+                f"⚠️ *Could not fetch account details.*\n"
+                f"⏰ *Token Expires:* {expiry_str}\n\n"
+                f"🔗 *Login Links:*"
             )
-            await update.message.reply_text(message, parse_mode="Markdown")
-        
-    except Exception as e:
+
+        # Create buttons
+        keyboard = [
+            [InlineKeyboardButton("💻 PC / Browser", url=pc_link)],
+            [InlineKeyboardButton("📱 Phone / Mobile", url=phone_link)],
+            [InlineKeyboardButton("🌐 Open Netflix", url="https://netflix.com")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         await update.message.reply_text(
-            f"❌ **Error:** {str(e)}",
-            parse_mode="Markdown"
+            message,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
         )
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    stats_text = (
-        f"📊 **Current Statistics**\n\n"
-        f"{counters.get_stats()}\n\n"
-        f"🔄 Use /resetstats to reset counters"
-    )
-    keyboard = [
-        [InlineKeyboardButton("🔄 Reset Stats", callback_data="reset_stats")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(stats_text, reply_markup=reply_markup, parse_mode="Markdown")
+    except requests.RequestException as e:
+        await update.message.reply_text(f"❌ Request failed: {str(e)}")
+    except ValueError as e:
+        await update.message.reply_text(f"❌ Failed: {str(e)}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Unexpected error: {str(e)}")
 
-async def reset_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    counters.reset()
-    await update.message.reply_text("📊 **Statistics have been reset!**", parse_mode="Markdown")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = (
-        "📖 **How to Use**\n\n"
-        "1️⃣ Send a .TXT file containing Netflix cookies\n"
-        "2️⃣ I will check the cookie and detect:\n"
-        "   • Premium ✅ → NFTokens generated\n"
-        "   • Standard ✅ → NFTokens generated\n"
-        "   • Basic ✅ → NFTokens generated\n"
-        "   • Mobile ✅ → NFTokens generated\n"
-        "   • Custom (Canceled) ❌ → No NFTokens\n"
-        "   • Free ❌ → No NFTokens\n"
-        "   • Bad ❌ → No NFTokens\n\n"
-        "📂 **Cookie Formats accepted:**\n"
-        "• Netscape format\n"
-        "• JSON format\n"
-        "• Direct key=value format\n\n"
-        "💎 **NFToken Links:** PC + Phone\n\n"
-        "📊 Use /stats to see statistics\n"
-        "🔄 Use /resetstats to reset counters"
+    await update.message.reply_text(
+        "📖 How to use:\n\n"
+        "1. Send the cookies to this bot\n"
+        "2. Get login links (PC & Phone) with account details\n\n"
+        "⚠️ *Note:* Cookies must be fresh!\n"
+        "The token link expires in about 1 hour.\n\n"
+        "Use browser extensions like 'EditThisCookie' to export cookies."
     )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "reset_stats":
-        counters.reset()
-        await query.edit_message_text("📊 **Statistics have been reset!**", parse_mode="Markdown")
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"Error: {context.error}")
-
-# ============ MAIN ============
 def main():
-    try:
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("stats", stats_command))
-        application.add_handler(CommandHandler("resetstats", reset_stats_command))
-        application.add_handler(CallbackQueryHandler(button_callback, pattern="^(reset_stats)$"))
-        application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-        application.add_error_handler(error_handler)
-        
-        print("🤖 Netflix Cookie Checker Bot is running...")
-        print("✅ Single TXT file processing")
-        print("💎 Premium, Standard, Basic, Mobile → NFTokens")
-        print("❌ Custom, Free, Bad → No NFTokens")
-        print("🌐 Keep-alive server running")
-        
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-        
-    except Exception as e:
-        print(f"Error: {e}")
+    print("🤖 Bot is starting...")
+    
+    # ============ PORT FIX ============
+    PORT = int(os.environ.get("PORT", 10000))
+    print(f"✅ Server will run on port {PORT}")
+
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cookies))
+
+    print("✅ Bot is running! 🚀")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
